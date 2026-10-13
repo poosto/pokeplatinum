@@ -114,7 +114,7 @@ index 95b3b71..0eb7b4d 100644
 \ No newline at end of file
 +}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..a41df2e 100644
+index d968038..590dbf6 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
 @@ -1,7 +1,9 @@
@@ -142,7 +142,17 @@ index d968038..a41df2e 100644
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-@@ -392,8 +400,10 @@ void *SIM_RenderInit(void *arg) {
+@@ -378,7 +386,8 @@ void *SIM_RenderInit(void *arg) {
+ 
+   window = SDL_CreateWindow(
+       windowTitle.c_str(), 100, 100, windowWidth, windowHeight,
+-      SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
++      SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
++          SDL_WINDOW_ALLOW_HIGHDPI);
+   context = SDL_GL_CreateContext(window);
+ 
+   if(s_SIM_config.fullScreen) {
+@@ -392,8 +401,10 @@ void *SIM_RenderInit(void *arg) {
    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
    glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
@@ -155,7 +165,24 @@ index d968038..a41df2e 100644
  
    GLenum glErrCode;
    GLint status;
-@@ -1074,8 +1084,25 @@ void *SIM_Render(void *arg) {
+@@ -1010,7 +1021,15 @@ void *SIM_Render(void *arg) {
+       viewY = 0;
+     }
+ 
+-    glViewport(viewX, viewY, viewWidth, viewHeight);
++    // The layout above is in window points (used for touch input). On HiDPI
++    // displays the GL drawable has more pixels than that, so scale to it.
++    int drawableWidth;
++    int drawableHeight;
++    SDL_GL_GetDrawableSize(window, &drawableWidth, &drawableHeight);
++    float pixelScale =
++        windowWidth > 0 ? (float)drawableWidth / (float)windowWidth : 1.0f;
++    glViewport((int)(viewX * pixelScale), (int)(viewY * pixelScale),
++               (int)(viewWidth * pixelScale), (int)(viewHeight * pixelScale));
+ 
+     // Set up the bounding box of the touch panel
+     if (s_SIM_config.swapScreens) {
+@@ -1074,8 +1093,25 @@ void *SIM_Render(void *arg) {
            break;
          }
        }
