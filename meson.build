@@ -1,4 +1,4 @@
-project('pokeplatinum', ['c', 'cpp', 'nasm'],
+project('pokeplatinum', ['c', 'cpp'],
     version: '1.0',
     meson_version: '>=1.12.0',
     default_options : [
@@ -9,6 +9,10 @@ project('pokeplatinum', ['c', 'cpp', 'nasm'],
 
 fs = import('fs')
 build_target = get_option('build_target')
+
+if build_target == 'arm'
+    add_languages('nasm', native: false)
+endif
 
 ############################################################
 ###                    INCLUDE PATHS                     ###
@@ -300,6 +304,49 @@ trainer_ai_o = custom_target(
         '@INPUT@',
     ],
     depfile: '@BASENAME@.d'
+)
+elif host_machine.system() == 'darwin'
+trainer_ai_elf = custom_target(
+    'trainer_ai_script_elf.o',
+    output: 'trainer_ai_script_elf.o',
+    input: files('src/battle/trainer_ai/script.s'),
+    command: [
+        arm_none_eabi_gcc_exe,
+        '-I', meson.global_source_root() / 'include',
+        '-I', meson.global_source_root() / 'asm',
+        '-I', meson.global_build_root(),
+        '-x', 'assembler-with-cpp',
+        '-MD', '-MF', '@DEPFILE@',
+        '-c', '-o', '@OUTPUT@',
+        '@INPUT@',
+    ],
+    depfile: '@BASENAME@.d'
+)
+
+trainer_ai_bin = custom_target(
+    'trainer_ai_script.bin',
+    output: 'trainer_ai_script.bin',
+    input: trainer_ai_elf,
+    command: [
+        arm_none_eabi_objcopy_exe,
+        '-O', 'binary',
+        '-j', '.text',
+        '@INPUT@', '@OUTPUT@',
+    ],
+)
+
+trainer_ai_o = custom_target(
+    'trainer_ai_script.o',
+    output: 'trainer_ai_script.o',
+    input: files('src/battle/trainer_ai/script_macos.s'),
+    depends: trainer_ai_bin,
+    command: [
+        'as',
+        '-I', meson.global_source_root() / 'asm',
+        '-I', meson.global_build_root(),
+        '-o', '@OUTPUT@',
+        '@INPUT@',
+    ],
 )
 else
 trainer_ai_ss = custom_target(

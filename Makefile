@@ -33,10 +33,12 @@ GIT ?= git
 BUILD ?= build
 BUILD_LINUX ?= $(BUILD)_linux
 BUILD_WIN64 ?= $(BUILD)_win64
+BUILD_MACOS ?= $(BUILD)_macos
 BUILD_NX ?= $(BUILD)_nx
 ROOT_INI := $(BUILD)/root.ini
 ROOT_INI_LINUX := $(BUILD_LINUX)/root.ini
 ROOT_INI_WIN64 := $(BUILD_WIN64)/root.ini
+ROOT_INI_MACOS := $(BUILD_MACOS)/root.ini
 ROOT_INI_NX := $(BUILD_NX)/root.ini
 
 UNAME_R := $(shell uname -r)
@@ -124,6 +126,9 @@ linux: $(BUILD_LINUX)/build.ninja
 win64: $(BUILD_WIN64)/build.ninja
 	$(MESON) compile -C $(BUILD_WIN64)
 
+macos: $(BUILD_MACOS)/build.ninja
+	$(MESON) compile -C $(BUILD_MACOS)
+
 nx: $(BUILD_NX)/build.ninja
 	$(MESON) compile -C $(BUILD_NX)
 
@@ -191,6 +196,17 @@ $(BUILD_WIN64)/build.ninja: $(ROOT_INI_WIN64) | $(BUILD_WIN64) $(SKREW_EXE) meso
 		-- $(BUILD_WIN64)
 endif
 
+# To keep things simple, keep the build target as Linux and add MacOS-specific overrides when needed
+# This is easier than redefining everything for MacOS since most carries over from Linux
+$(BUILD_MACOS)/build.ninja: $(ROOT_INI_MACOS) | $(BUILD_MACOS) $(SKREW_EXE) meson
+	$(MESON) setup \
+		-Dbuild_target=linux \
+		--native-file=meson/$(NATIVE) \
+		--native-file=$(ROOT_INI_MACOS) \
+		--cross-file=meson/cross_pcport_macos.ini \
+		--cross-file=$(ROOT_INI_MACOS) \
+		-- $(BUILD_MACOS)
+
 $(BUILD_NX)/build.ninja: $(ROOT_INI_NX) | $(BUILD_NX) $(SKREW_EXE) meson
 	$(MESON) setup \
 		-Dbuild_target=nx \
@@ -212,6 +228,10 @@ $(ROOT_INI_WIN64): | $(BUILD_WIN64)
 	echo "[constants]" > $@
 	echo "root = '$$PWD'" >> $@
 
+$(ROOT_INI_MACOS): | $(BUILD_MACOS)
+	echo "[constants]" > $@
+	echo "root = '$$PWD'" >> $@
+
 $(ROOT_INI_NX): | $(BUILD_NX)
 	echo "[constants]" > $@
 	echo "root = '$$PWD'" >> $@
@@ -224,6 +244,9 @@ $(BUILD_LINUX):
 
 $(BUILD_WIN64):
 	mkdir -p -- $(BUILD_WIN64)
+
+$(BUILD_MACOS):
+	mkdir -p -- $(BUILD_MACOS)
 
 $(BUILD_NX):
 	mkdir -p -- $(BUILD_NX) 
