@@ -114,7 +114,7 @@ index 95b3b71..0eb7b4d 100644
 \ No newline at end of file
 +}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..5b1111f 100644
+index d968038..a41df2e 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
 @@ -1,7 +1,9 @@
@@ -155,6 +155,32 @@ index d968038..5b1111f 100644
  
    GLenum glErrCode;
    GLint status;
+@@ -1074,8 +1084,25 @@ void *SIM_Render(void *arg) {
+           break;
+         }
+       }
++      if (Event.type == SDL_QUIT) {
++        // Cmd+Q on macOS, or the OS asking the app to quit
++        exit(0);
++      }
+       if (Event.type == SDL_KEYDOWN) {
+         int keyRead = Event.key.keysym.sym;
++        u16 keyMod = Event.key.keysym.mod;
++        // Toggle fullscreen: F11, Alt+Enter, or Ctrl+Cmd+F (macOS)
++        if (!Event.key.repeat &&
++            (keyRead == SDLK_F11 ||
++             (keyRead == SDLK_RETURN && (keyMod & KMOD_ALT)) ||
++             (keyRead == SDLK_f && (keyMod & KMOD_CTRL) && (keyMod & KMOD_GUI)))) {
++          s_SIM_config.fullScreen = !s_SIM_config.fullScreen;
++          SDL_SetWindowFullscreen(window, s_SIM_config.fullScreen
++                                              ? SDL_WINDOW_FULLSCREEN_DESKTOP
++                                              : 0);
++          SIM_Config_SaveConfigFile(&s_SIM_config);
++          continue;
++        }
+         if (keyRead == s_SIM_config.padSettings.aKey) {
+           // A Button
+           s_reg_PAD_KEYINPUT = s_reg_PAD_KEYINPUT & 0b1111111111111110;
 diff --git a/meson.build b/meson.build
 index 3dc91bf..710b510 100644
 --- a/meson.build
