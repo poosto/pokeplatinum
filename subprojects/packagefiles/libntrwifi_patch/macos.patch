@@ -1,0 +1,48 @@
+diff --git a/libraries/cps/src/network.c b/libraries/cps/src/network.c
+index 9cd238b..ea7a6e5 100644
+--- a/libraries/cps/src/network.c
++++ b/libraries/cps/src/network.c
+@@ -7,6 +7,7 @@
+ #endif
+ #if defined(SDK_BUILD_LINUX) || defined(SDK_BUILD_NX)
+ #include <errno.h>
++#include <fcntl.h>
+ #include <sys/socket.h>
+ #include <sys/select.h>
+ #include <netinet/in.h>
+@@ -3390,7 +3391,13 @@ void CPS_SocBind(u16 local_port, u16 remote_port, CPSInAddr remote_ip)
+       setsockopt(mySoc->WIN_socket, SOL_SOCKET, SO_REUSEADDR, &setting, sizeof(int));
+       #endif
+       #ifdef SDK_BUILD_LINUX
++      #ifdef __APPLE__
++      mySoc->WIN_socket = socket(AF_INET, SOCK_DGRAM, 0);
++      int flags = fcntl(mySoc->WIN_socket, F_GETFL, 0);
++      fcntl(mySoc->WIN_socket, F_SETFL, flags | O_NONBLOCK);
++      #else
+       mySoc->WIN_socket = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
++      #endif
+       setsockopt(mySoc->WIN_socket, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+       #endif
+     } else {
+@@ -3399,8 +3406,14 @@ void CPS_SocBind(u16 local_port, u16 remote_port, CPSInAddr remote_ip)
+       mySoc->WIN_socket = socket(AF_INET, SOCK_STREAM, 0);
+       #endif
+       #ifdef SDK_BUILD_LINUX
++      #ifdef __APPLE__
++      mySoc->WIN_socket = socket(AF_INET, SOCK_STREAM, 0);
++      int flags = fcntl(mySoc->WIN_socket, F_GETFL, 0);
++      fcntl(mySoc->WIN_socket, F_SETFL, flags | O_NONBLOCK);
++      #else
+       mySoc->WIN_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+       #endif
++      #endif
+     }
+ 
+     int status;
+@@ -4612,4 +4625,4 @@ u32 CPSi_TcpWrite2Raw(u8 *buf, u32 len, u8 *buf2, u32 len2, CPSSoc *soc)
+     }
+   } while( TRUE );
+ #endif
+-}
+\ No newline at end of file
++}

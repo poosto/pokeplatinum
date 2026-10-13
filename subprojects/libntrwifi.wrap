@@ -1,8 +1,9 @@
 [wrap-git]
 url = https://github.com/cybervisi0n/libntrwifi.git
-revision = main
+revision = 067dabb137dfaf80b8ceeb3b3c4a7256bfabc3e0
 depth = 1
 directory = libntrwifi
+diff_files = libntrwifi_patch/macos.patch
 
 [provide]
 dependency_names = NitroWiFi

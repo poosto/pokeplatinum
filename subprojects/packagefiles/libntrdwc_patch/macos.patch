@@ -1,0 +1,49 @@
+diff --git a/include/decomp/decomp_defs.h b/include/decomp/decomp_defs.h
+index df71a28..2289b45 100644
+--- a/include/decomp/decomp_defs.h
++++ b/include/decomp/decomp_defs.h
+@@ -45,7 +45,9 @@ typedef unsigned long long unsigned_long_long;
+ 
+ typedef int BOOL;
+ 
++#ifndef __APPLE__
+ typedef ushort wctype_t;
++#endif
+ 
+ typedef struct tagACHOLD tagACHOLD, *PtagACHOLD;
+ 
+diff --git a/libraries/ac/src/nintendospot.c b/libraries/ac/src/nintendospot.c
+index cfeb96a..360c171 100644
+--- a/libraries/ac/src/nintendospot.c
++++ b/libraries/ac/src/nintendospot.c
+@@ -6,7 +6,9 @@
+ 
+ #include "dwc_memfunc.h"
+ 
++#ifndef __APPLE__
+ typedef ushort wctype_t;
++#endif
+ 
+ typedef struct DWCWDSWork DWCWDSWork, *PDWCWDSWork;
+ 
+@@ -337,4 +339,4 @@ static void WDS_Error_End_CB(void)
+   //DWC_Printf(0x2000000,_14904,gAppstate,in_r3,in_r3);
+   gAppstate = APP_STATE_ERROREND;
+   return;
+-}
+\ No newline at end of file
++}
+diff --git a/libraries/auth/src/dwc_prof.c b/libraries/auth/src/dwc_prof.c
+index 1095ca6..784923f 100644
+--- a/libraries/auth/src/dwc_prof.c
++++ b/libraries/auth/src/dwc_prof.c
+@@ -164,7 +164,9 @@ typedef int BOOL;
+ 
+ typedef uint CPSInAddr;
+ 
++#ifndef __APPLE__
+ typedef ushort wctype_t;
++#endif
+ 
+ typedef struct OSThreadInfo OSThreadInfo, *POSThreadInfo;
+ 

@@ -1,8 +1,9 @@
 [wrap-git]
 url = https://github.com/cybervisi0n/libntr.git
-revision = main
+revision = 1555d911ac80c0190ac1c321f99f1323de8b3c09
 depth = 1
 directory = libntr
+diff_files = libntr_patch/macos.patch
 
 [provide]
 dependency_names = NitroSDK

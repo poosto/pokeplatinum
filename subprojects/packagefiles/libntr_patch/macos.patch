@@ -1,0 +1,178 @@
+diff --git a/libraries/sim/meson.build b/libraries/sim/meson.build
+index acd4afb..6c38cce 100644
+--- a/libraries/sim/meson.build
++++ b/libraries/sim/meson.build
+@@ -2,8 +2,8 @@ subdir('src')
+ 
+ libsim_includes = include_directories('include')
+ 
+-sdl2_lib = library('SDL2')
+-enet_lib = library('enet')
++sdl2_lib = []
++enet_lib = []
+ 
+ if(build_target == 'linux' or build_target == 'win64')
+ sdl2_lib = meson.get_compiler('c').find_library('SDL2')
+diff --git a/libraries/sim/src/g3_handler.cpp b/libraries/sim/src/g3_handler.cpp
+index 1ded67d..34705b5 100644
+--- a/libraries/sim/src/g3_handler.cpp
++++ b/libraries/sim/src/g3_handler.cpp
+@@ -414,7 +414,9 @@ void G3SIM_Begin(GXBegin type)
+     }
+     snprintf(debugMessage, 50, "GX_Begin %s", typeString);
+ 
+-    glDebugMessageInsert(GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_OTHER, 1337, GL_DEBUG_SEVERITY_NOTIFICATION, 50, debugMessage);
++    if (glDebugMessageInsert) {
++      glDebugMessageInsert(GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_OTHER, 1337, GL_DEBUG_SEVERITY_NOTIFICATION, 50, debugMessage);
++    }
+     s_primType = type;
+     s_G3numInPoly = 0;
+     s_G3drawPoly = 0;
+diff --git a/libraries/sim/src/shaders/g2_fragment.glsl b/libraries/sim/src/shaders/g2_fragment.glsl
+index b652bd5..367234f 100644
+--- a/libraries/sim/src/shaders/g2_fragment.glsl
++++ b/libraries/sim/src/shaders/g2_fragment.glsl
+@@ -1,5 +1,5 @@
+ R""(
+-#version 420 core
++#version 410 core
+ 
+ uniform sampler2D myTexture;
+ uniform sampler2D bgTexture[4];
+@@ -142,4 +142,4 @@ void main()
+         color.b = color.b - (color.b * (inMasterBrightFactor / 16.0));
+     }
+ }
+-)""
+\ No newline at end of file
++)""
+diff --git a/libraries/sim/src/shaders/g2_vertex.glsl b/libraries/sim/src/shaders/g2_vertex.glsl
+index fc7a724..f91cee2 100644
+--- a/libraries/sim/src/shaders/g2_vertex.glsl
++++ b/libraries/sim/src/shaders/g2_vertex.glsl
+@@ -1,5 +1,5 @@
+ R""(
+-#version 420 core
++#version 410 core
+ 
+ layout (location = 0) in vec3 position;
+ layout (location = 1) in vec2 texCoord;
+@@ -10,4 +10,4 @@ void main()
+     gl_Position = vec4(position.x, position.y, position.z, 1.);
+     fragTexCoord = vec2(texCoord.x, texCoord.y);
+ }
+-)""
+\ No newline at end of file
++)""
+diff --git a/libraries/sim/src/shaders/g3_fragment.glsl b/libraries/sim/src/shaders/g3_fragment.glsl
+index ffd028a..a675a65 100644
+--- a/libraries/sim/src/shaders/g3_fragment.glsl
++++ b/libraries/sim/src/shaders/g3_fragment.glsl
+@@ -1,5 +1,5 @@
+ R""(
+-#version 420 core
++#version 410 core
+ 
+ uniform sampler2D myTexture;
+ uniform int useTexture;
+@@ -60,4 +60,4 @@ void main()
+      color = shadedColor;
+     }
+ }
+-)""
+\ No newline at end of file
++)""
+diff --git a/libraries/sim/src/shaders/g3_vertex.glsl b/libraries/sim/src/shaders/g3_vertex.glsl
+index e994013..39f3d76 100644
+--- a/libraries/sim/src/shaders/g3_vertex.glsl
++++ b/libraries/sim/src/shaders/g3_vertex.glsl
+@@ -1,5 +1,5 @@
+ R""(
+-#version 420 core
++#version 410 core
+ 
+ layout (location = 0) in vec3 position;
+ layout (location = 1) in vec2 texCoord;
+diff --git a/libraries/sim/src/sim_gui.cpp b/libraries/sim/src/sim_gui.cpp
+index 95b3b71..0eb7b4d 100644
+--- a/libraries/sim/src/sim_gui.cpp
++++ b/libraries/sim/src/sim_gui.cpp
+@@ -49,7 +49,7 @@ void Init(SDL_Window * window, SDL_GLContext context) {
+ 
+ 
+ 	ImGui_ImplSDL2_InitForOpenGL(sWindow, sContext);
+-	const char * glsl_version = "#version 420";
++	const char * glsl_version = "#version 410";
+   	ImGui_ImplOpenGL3_Init(glsl_version);
+ 
+     ImGui::StyleColorsDark(NULL);
+@@ -157,4 +157,4 @@ void AppButton(const char * label, bool * state, void (*initFunc)(void), void (*
+     }
+ }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
+index d968038..5b1111f 100644
+--- a/libraries/sim/src/sim_main.cpp
++++ b/libraries/sim/src/sim_main.cpp
+@@ -1,7 +1,9 @@
+ extern "C" void NitroMain();
+ extern "C" int NitroSpMain(void *arg);
+ #define SDL_MAIN_HANDLED
++#ifndef __APPLE__
+ #define _POSIX_C_SOURCE 199309L
++#endif
+ 
+ #include <string>
+ #include <pthread.h>
+@@ -314,8 +316,14 @@ void *SIM_RenderInit(void *arg) {
+            SDL_INIT_JOYSTICK);
+   SIM_Audio_Init(44100);
+ 
++#ifdef __APPLE__
++  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
++  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
++  SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
++#else
+   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
++#endif
+   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+   SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+@@ -392,8 +400,10 @@ void *SIM_RenderInit(void *arg) {
+   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+   glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+ 
+-  glEnable(GL_DEBUG_OUTPUT);
+-  glDebugMessageCallback(MessageCallback, 0);
++  if (glDebugMessageCallback) {
++    glEnable(GL_DEBUG_OUTPUT);
++    glDebugMessageCallback(MessageCallback, 0);
++  }
+ 
+   GLenum glErrCode;
+   GLint status;
+diff --git a/meson.build b/meson.build
+index 3dc91bf..710b510 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1,4 +1,4 @@
+-project('libntr', 'c', 'cpp', 'nasm',
++project('libntr', 'c', 'cpp',
+     default_options: {
+         'default_library': 'static',
+         'prefer_static':    false
+@@ -15,6 +15,10 @@ build_target = get_option('build_target')
+ sdk_version_major = get_option('sdk_version_major')
+ hardware_type = get_option('hardware_type')
+ 
++if build_target == 'arm'
++    add_languages('nasm', native: false)
++endif
++
+ ############################################################
+ ###                    COMPILER FLAGS                    ###
+ ############################################################
