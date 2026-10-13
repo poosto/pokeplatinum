@@ -1,3 +1,15 @@
+diff --git a/include/simulator/config/sim_config.h b/include/simulator/config/sim_config.h
+index ce31436..97b4603 100644
+--- a/include/simulator/config/sim_config.h
++++ b/include/simulator/config/sim_config.h
+@@ -56,6 +56,7 @@ typedef struct {
+     u32 windowWidth; /* Initial width of the window. If set to 0, will use the default width for the screen layout */
+     u32 windowHeight; /* Initial height of the window. If set to 0, will use default height for the screen layout */
+     u8 fullScreen; /* TRUE to enable fullscreen */
++    u8 integerScaling; /* TRUE to scale the screens by whole multiples only */
+     u8 masterVolume; /* Master sound volume (0-127) */
+     SIM_config_screen_layout_type screenLayout; /* DS screen layout */
+     BOOL swapScreens; /* Swap screen positions */
 diff --git a/libraries/sim/meson.build b/libraries/sim/meson.build
 index acd4afb..6c38cce 100644
 --- a/libraries/sim/meson.build
@@ -13,6 +25,36 @@ index acd4afb..6c38cce 100644
  
  if(build_target == 'linux' or build_target == 'win64')
  sdl2_lib = meson.get_compiler('c').find_library('SDL2')
+diff --git a/libraries/sim/src/config/sim_config.c b/libraries/sim/src/config/sim_config.c
+index 9613af9..247ad41 100644
+--- a/libraries/sim/src/config/sim_config.c
++++ b/libraries/sim/src/config/sim_config.c
+@@ -41,6 +41,9 @@ static int IniHandler(void* user, const char* section, const char* name,
+     if(MATCH("General", "FullScreen")) {
+         config->fullScreen = StringToBool(value);
+     }
++    if(MATCH("General", "IntegerScaling")) {
++        config->integerScaling = StringToBool(value);
++    }
+     if(MATCH("General", "MasterVolume")) {
+         config->masterVolume = atoi(value);
+         if(config->masterVolume > 127) {
+@@ -348,6 +351,7 @@ void SIM_Config_LoadDefaults(SIM_config_type * aConfig)
+     aConfig->windowWidth = 0;
+ #endif
+     aConfig->fullScreen = FALSE;
++    aConfig->integerScaling = FALSE;
+     aConfig->screenLayout = SIM_CONFIG_SCREEN_LAYOUT_VERTICAL;
+     aConfig->swapScreens = FALSE;
+     aConfig->vsyncInterval = 1;
+@@ -426,6 +430,7 @@ void SIM_Config_SaveConfigFile(SIM_config_type * aConfig)
+     fprintf(configFile, "WindowHeight=%d\n", aConfig->windowHeight);
+     fprintf(configFile, "WindowWidth=%d\n", aConfig->windowWidth);
+     fprintf(configFile, "FullScreen=%s\n", BoolToString(aConfig->fullScreen));
++    fprintf(configFile, "IntegerScaling=%s\n", BoolToString(aConfig->integerScaling));
+     fprintf(configFile, "MasterVolume=%d\n", aConfig->masterVolume);
+ 
+     const char * screenLayoutString = ScreenLayoutTypeToString(aConfig->screenLayout);
 diff --git a/libraries/sim/src/g3_handler.cpp b/libraries/sim/src/g3_handler.cpp
 index 1ded67d..34705b5 100644
 --- a/libraries/sim/src/g3_handler.cpp
@@ -113,11 +155,43 @@ index 95b3b71..0eb7b4d 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/libraries/sim/src/sim_gui_config.cpp b/libraries/sim/src/sim_gui_config.cpp
+index 4cc4aa3..e12e3f7 100644
+--- a/libraries/sim/src/sim_gui_config.cpp
++++ b/libraries/sim/src/sim_gui_config.cpp
+@@ -42,7 +42,8 @@ void AppConfigMain(bool *openState) {
+     int vSyncInterval = sConfig->vsyncInterval;
+     bool frameLimit = sConfig->capFrameRate;
+     bool fullScreen = sConfig->fullScreen;
+-    
++    bool integerScaling = sConfig->integerScaling;
++
+     ImGui::Begin("Config", openState);
+ 
+     ImGui::Text("Internal Resolution");
+@@ -54,6 +55,9 @@ void AppConfigMain(bool *openState) {
+     if(ImGui::Checkbox("Fullscreen", &fullScreen)) {
+         configChanged = true;
+     }
++    if(ImGui::Checkbox("Integer scaling", &integerScaling)) {
++        configChanged = true;
++    }
+ 
+     if(ImGui::Combo("Layout", &screenLayout, ScreenLayoutStrings, 3, 3)) {
+         configChanged = true;
+@@ -79,6 +83,7 @@ void AppConfigMain(bool *openState) {
+         sConfig->screenLayout = static_cast<SIM_config_screen_layout_type>(screenLayout);
+         sConfig->swapScreens = swapScreens;
+         sConfig->fullScreen = fullScreen;
++        sConfig->integerScaling = integerScaling;
+         if(sConfig->fullScreen) {
+             SDL_SetWindowFullscreen(SIM_GetSDLWindow(), SDL_WINDOW_FULLSCREEN_DESKTOP);
+         } else {
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..590dbf6 100644
+index d968038..a41abe2 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
-@@ -1,7 +1,9 @@
+@@ -1,8 +1,11 @@
  extern "C" void NitroMain();
  extern "C" int NitroSpMain(void *arg);
  #define SDL_MAIN_HANDLED
@@ -125,9 +199,11 @@ index d968038..590dbf6 100644
  #define _POSIX_C_SOURCE 199309L
 +#endif
  
++#include <algorithm>
  #include <string>
  #include <pthread.h>
-@@ -314,8 +316,14 @@ void *SIM_RenderInit(void *arg) {
+ #include <SDL2/SDL.h>
+@@ -314,8 +317,14 @@ void *SIM_RenderInit(void *arg) {
             SDL_INIT_JOYSTICK);
    SIM_Audio_Init(44100);
  
@@ -142,7 +218,7 @@ index d968038..590dbf6 100644
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-@@ -378,7 +386,8 @@ void *SIM_RenderInit(void *arg) {
+@@ -378,7 +387,8 @@ void *SIM_RenderInit(void *arg) {
  
    window = SDL_CreateWindow(
        windowTitle.c_str(), 100, 100, windowWidth, windowHeight,
@@ -152,7 +228,7 @@ index d968038..590dbf6 100644
    context = SDL_GL_CreateContext(window);
  
    if(s_SIM_config.fullScreen) {
-@@ -392,8 +401,10 @@ void *SIM_RenderInit(void *arg) {
+@@ -392,8 +402,10 @@ void *SIM_RenderInit(void *arg) {
    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
    glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
@@ -165,7 +241,39 @@ index d968038..590dbf6 100644
  
    GLenum glErrCode;
    GLint status;
-@@ -1010,7 +1021,15 @@ void *SIM_Render(void *arg) {
+@@ -982,6 +994,8 @@ void *SIM_Render(void *arg) {
+     int viewX = 0;
+     int viewY = 0;
+     float aspectRatio;
++    int layoutWidth;
++    int layoutHeight;
+ 
+     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+ 
+@@ -989,15 +1003,19 @@ void *SIM_Render(void *arg) {
+     switch (s_SIM_config.screenLayout) {
+     default:
+     case SIM_CONFIG_SCREEN_LAYOUT_VERTICAL:
+-      aspectRatio = 256.0f / 384.0f;
++      layoutWidth = 256;
++      layoutHeight = 384;
+       break;
+     case SIM_CONFIG_SCREEN_LAYOUT_HORIZONTAL:
+-      aspectRatio = 512.0f / 192.0f;
++      layoutWidth = 512;
++      layoutHeight = 192;
+       break;
+     case SIM_CONFIG_SCREEN_LAYOUT_LARGE:
+-      aspectRatio = 768.0f / 384.0f;
++      layoutWidth = 768;
++      layoutHeight = 384;
+       break;
+     }
++    aspectRatio = (float)layoutWidth / (float)layoutHeight;
+ 
+     viewWidth = windowWidth;
+     viewHeight = (int)((float)windowWidth / aspectRatio);
+@@ -1010,7 +1028,38 @@ void *SIM_Render(void *arg) {
        viewY = 0;
      }
  
@@ -177,12 +285,35 @@ index d968038..590dbf6 100644
 +    SDL_GL_GetDrawableSize(window, &drawableWidth, &drawableHeight);
 +    float pixelScale =
 +        windowWidth > 0 ? (float)drawableWidth / (float)windowWidth : 1.0f;
-+    glViewport((int)(viewX * pixelScale), (int)(viewY * pixelScale),
-+               (int)(viewWidth * pixelScale), (int)(viewHeight * pixelScale));
++    int viewPixelX = (int)(viewX * pixelScale);
++    int viewPixelY = (int)(viewY * pixelScale);
++    int viewPixelWidth = (int)(viewWidth * pixelScale);
++    int viewPixelHeight = (int)(viewHeight * pixelScale);
++
++    if (s_SIM_config.integerScaling) {
++      // Snap to the largest whole multiple of the layout that fits, so every
++      // DS pixel covers the same number of physical pixels
++      int scale = std::min(drawableWidth / layoutWidth,
++                           drawableHeight / layoutHeight);
++      if (scale >= 1) {
++        viewPixelWidth = layoutWidth * scale;
++        viewPixelHeight = layoutHeight * scale;
++        viewPixelX = (drawableWidth - viewPixelWidth) / 2;
++        viewPixelY = (drawableHeight - viewPixelHeight) / 2;
++
++        // Keep the touch panel (in window points) in sync with the new view
++        viewX = (int)(viewPixelX / pixelScale);
++        viewY = (int)(viewPixelY / pixelScale);
++        viewWidth = (int)(viewPixelWidth / pixelScale);
++        viewHeight = (int)(viewPixelHeight / pixelScale);
++      }
++    }
++
++    glViewport(viewPixelX, viewPixelY, viewPixelWidth, viewPixelHeight);
  
      // Set up the bounding box of the touch panel
      if (s_SIM_config.swapScreens) {
-@@ -1074,8 +1093,25 @@ void *SIM_Render(void *arg) {
+@@ -1074,8 +1123,25 @@ void *SIM_Render(void *arg) {
            break;
          }
        }
