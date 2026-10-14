@@ -57,6 +57,20 @@ index 6e87d9a..c1319c7 100644
  
  #ifdef __cplusplus
  }
+diff --git a/include/simulator/sim_crc32.h b/include/simulator/sim_crc32.h
+index b96f3e0..1e7c9f6 100644
+--- a/include/simulator/sim_crc32.h
++++ b/include/simulator/sim_crc32.h
+@@ -10,6 +10,9 @@ extern "C" {
+ 
+ u32 SIM_updateCRC32(u8 ch, u32 crc);
+ u32 SIM_crc32buf(u8 *buf, size_t len);
++/* Fast checksum for cache keys. Uses the hardware CRC32C instructions when the
++   CPU has them, so the value differs from SIM_crc32buf */
++u32 SIM_hashbuf(const u8 *buf, size_t len);
+ 
+ #ifdef __cplusplus
+ }
 diff --git a/include/simulator/sim_g3_lights.h b/include/simulator/sim_g3_lights.h
 new file mode 100644
 index 0000000..187e6a6
@@ -256,32 +270,101 @@ index 9613af9..247ad41 100644
  
      const char * screenLayoutString = ScreenLayoutTypeToString(aConfig->screenLayout);
 diff --git a/libraries/sim/src/g3_draw.cpp b/libraries/sim/src/g3_draw.cpp
-index 2cb19b4..a8d4f29 100644
+index 2cb19b4..259c926 100644
 --- a/libraries/sim/src/g3_draw.cpp
 +++ b/libraries/sim/src/g3_draw.cpp
-@@ -12,6 +12,7 @@
+@@ -11,7 +11,9 @@
+ #include <nitro/gx/gx_load.h>
  #include <nitro/gx/gx_vramcnt.h>
  #include <unordered_map>
++#include <vector>
  #include <simulator/sim_crc32.h>
 +#include <simulator/sim_g3_lights.h>
  #include "simulator/sim_g3_TextureCache.hpp"
  #include "simulator/sim_g3_Texture.hpp"
  
-@@ -157,9 +158,13 @@ void G3SIM_DrawInit()
+@@ -47,7 +49,15 @@ static u32 s_G3DrawItemListCount = 0;
+ 
+ static u32 s_G3DrawCurVertIdx = 0;
+ static GLuint s_G3DrawVertexArray;
+-static GLuint s_G3DrawVertexBuffer;
++
++// Every draw in a frame gets its own vertex buffer. Rewriting a buffer that
++// pending draws still read from makes the macOS GL driver submit all queued GPU
++// work and start a new render pass, which happened for every batch and was the
++// main cost of busy scenes. The buffers are reused from the next frame on.
++static std::vector<GLuint> s_G3DrawStreamBuffers;
++static size_t s_G3DrawStreamBufferIdx = 0;
++// Safety net in case the end of frame reset is ever skipped
++#define G3_DRAW_MAX_STREAM_BUFFERS 8192
+ 
+ extern G3SIM_TexImageParam_t s_texImageParam;
+ extern G3SIM_PolygonAttr_t s_curPolygonAttr;
+@@ -126,14 +136,38 @@ void G3SIM_AddVtx(G3SIM_Vertex_t * vtx)
+ 	return;
+ }
+ 
++static void SetVertexAttribPointers()
++{
++	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, x));
++	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, s));
++	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, r));
++	glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, vx));
++	glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, nx));
++}
++
++static void DrawVerts(const G3SIM_Vertex_t * verts, u32 count)
++{
++	if (s_G3DrawStreamBufferIdx >= G3_DRAW_MAX_STREAM_BUFFERS) {
++		s_G3DrawStreamBufferIdx = 0;
++	}
++	if (s_G3DrawStreamBufferIdx == s_G3DrawStreamBuffers.size()) {
++		GLuint buffer;
++		glGenBuffers(1, &buffer);
++		s_G3DrawStreamBuffers.push_back(buffer);
++	}
++
++	glBindVertexArray(s_G3DrawVertexArray);
++	glBindBuffer(GL_ARRAY_BUFFER, s_G3DrawStreamBuffers[s_G3DrawStreamBufferIdx++]);
++	glBufferData(GL_ARRAY_BUFFER, sizeof(G3SIM_Vertex_t) * count, verts, GL_STREAM_DRAW);
++	SetVertexAttribPointers();
++	glDrawArrays(GL_TRIANGLES, 0, count);
++}
++
+ void G3SIM_DrawArray()
+ {
+ 	if( s_G3DrawCurVertIdx != 0 )
+ 	{
+-		glBindVertexArray(s_G3DrawVertexArray);
+-		glBindBuffer(GL_ARRAY_BUFFER, s_G3DrawVertexBuffer);
+-		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(G3SIM_Vertex_t) * s_G3DrawCurVertIdx, s_G3DrawVerts);
+-		glDrawArrays(GL_TRIANGLES,0,s_G3DrawCurVertIdx);
++		DrawVerts(s_G3DrawVerts, s_G3DrawCurVertIdx);
+ 	}
+ 	return;
+ }
+@@ -148,18 +182,11 @@ void G3SIM_DrawInit()
+ 	glGenVertexArrays(1, &s_G3DrawVertexArray);
+ 	glBindVertexArray(s_G3DrawVertexArray);
+ 
+-	glGenBuffers(1, &s_G3DrawVertexBuffer);
+-
+-	glBindBuffer(GL_ARRAY_BUFFER, s_G3DrawVertexBuffer);
+-	glBufferData(GL_ARRAY_BUFFER, sizeof(s_G3DrawVerts), NULL, GL_DYNAMIC_DRAW);
+-
+-
  	glEnableVertexAttribArray(0);
      glEnableVertexAttribArray(1);
  	glEnableVertexAttribArray(2);
+-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, x));
+-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, s));
+-	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, r));
 +	glEnableVertexAttribArray(3);
 +	glEnableVertexAttribArray(4);
- 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, x));
-     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, s));
- 	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, r));
-+	glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, vx));
-+	glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, nx));
  
  	glBindVertexArray(0);
  	glDisableVertexAttribArray(0);
-@@ -178,6 +183,8 @@ void G3SIM_FlushArray()
+@@ -178,6 +205,8 @@ void G3SIM_FlushArray()
  	TracyCZone(FlushArrayZone, 1);
  	#endif
  
@@ -290,6 +373,42 @@ index 2cb19b4..a8d4f29 100644
  	u8 * texBuf = nullptr;
  	std::shared_ptr<SIM::G3::Texture> texture = nullptr;
  
+@@ -189,7 +218,7 @@ void G3SIM_FlushArray()
+ 		u16 * colorAddr = (u16*)vramPltt;
+ 
+ 		//Calculate the texture + palette CRC
+-		u32 paletteCRC = SIM_crc32buf(vramPltt, 512);
++		u32 paletteCRC = SIM_hashbuf(vramPltt, 512);
+ 		u32 vramTexBufSize = 0;
+ 
+ 		if(s_texImageParam.textureFormat == GX_TEXFMT_PLTT4) {
+@@ -200,7 +229,7 @@ void G3SIM_FlushArray()
+ 			vramTexBufSize = (s_texImageParam.textureSSize * s_texImageParam.textureTSize);
+ 		}
+ 
+-		u32 textureCRC = SIM_crc32buf(vramTex, vramTexBufSize);
++		u32 textureCRC = SIM_hashbuf(vramTex, vramTexBufSize);
+ 		texture = sTextureCache.GetTexture(textureCRC, paletteCRC);
+ 		if(texture == nullptr) {
+ 			// decode texture and create it in the cache
+@@ -404,12 +433,12 @@ void G3SIM_DrawItems()
+ 		GLint polygonModeLoc = glGetUniformLocation(g3shaderProgramID, "polygonMode");
+ 		glProgramUniform1i(g3shaderProgramID, polygonModeLoc, item->polygonAttr.polygonMode);
+ 
+-		glBindVertexArray(s_G3DrawVertexArray);
+-		glBindBuffer(GL_ARRAY_BUFFER, s_G3DrawVertexBuffer);
+-		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(G3SIM_Vertex_t) * item->vertsCount, item->verts);
+-		glDrawArrays(GL_TRIANGLES,0, item->vertsCount);
++		DrawVerts(item->verts, item->vertsCount);
+ 
+ 		free(item->verts);
+ 	}
+ 	s_G3DrawItemListCount = 0;
++
++	// The frame's draws are all queued, so the buffers can be reused next frame
++	s_G3DrawStreamBufferIdx = 0;
+ }
+\ No newline at end of file
 diff --git a/libraries/sim/src/g3_handler.cpp b/libraries/sim/src/g3_handler.cpp
 index 1ded67d..e19aad4 100644
 --- a/libraries/sim/src/g3_handler.cpp
@@ -779,6 +898,75 @@ index e994013..12ced66 100644
 +    fragNormalOverDepth = inNormal * invDepth;
  }
  )""
+diff --git a/libraries/sim/src/sim_crc32.c b/libraries/sim/src/sim_crc32.c
+index ed806e9..930dff1 100644
+--- a/libraries/sim/src/sim_crc32.c
++++ b/libraries/sim/src/sim_crc32.c
+@@ -1,5 +1,11 @@
+ #include "simulator/sim_crc32.h"
+ 
++#include <string.h>
++
++#if defined(__ARM_FEATURE_CRC32)
++#include <arm_acle.h>
++#endif
++
+ 
+ #define UPDC32(octet,crc) (crc_32_tab[((crc)\
+      ^ ((u8)octet)) & 0xff] ^ ((crc) >> 8))
+@@ -68,4 +74,26 @@ u32 SIM_crc32buf(u8 *buf, size_t len)
+ 
+       return ~oldcrc32;
+       
+-}
+\ No newline at end of file
++}
++
++u32 SIM_hashbuf(const u8 *buf, size_t len)
++{
++#if defined(__ARM_FEATURE_CRC32)
++      u32 crc = 0xFFFFFFFF;
++
++      for ( ; len >= 8; len -= 8, buf += 8)
++      {
++            u64 chunk;
++            memcpy(&chunk, buf, sizeof(chunk));
++            crc = __crc32cd(crc, chunk);
++      }
++      for ( ; len; --len, ++buf)
++      {
++            crc = __crc32cb(crc, *buf);
++      }
++
++      return ~crc;
++#else
++      return SIM_crc32buf((u8 *)buf, len);
++#endif
++}
+diff --git a/libraries/sim/src/sim_g2.cpp b/libraries/sim/src/sim_g2.cpp
+index 86cd85e..7b71aab 100644
+--- a/libraries/sim/src/sim_g2.cpp
++++ b/libraries/sim/src/sim_g2.cpp
+@@ -39,8 +39,8 @@ extern u8 s_SIM_DBG_OAMSenable;
+ 
+ extern u8 s_mosaicTable[16][256];
+ 
+-extern GLuint s_bgTextureId[4];
+-extern GLuint s_objTextureId[5];
++extern GLuint s_bgTextureId[2][4];
++extern GLuint s_objTextureId[2][5];
+ extern GLint s_bgTexUnits[];
+ 
+ extern u32 OBJLine[2][256];
+@@ -241,7 +241,7 @@ void G2SIM_DrawBG(u8 bgNum, u8 bgMode, u8 bg03D, u8 isSub) {
+   }
+ 
+   glActiveTexture(GL_TEXTURE0 + s_bgTexUnits[bgNum]);
+-  glBindTexture(GL_TEXTURE_2D, s_bgTextureId[bgNum]);
++  glBindTexture(GL_TEXTURE_2D, s_bgTextureId[isSub ? 1 : 0][bgNum]);
+ 
+   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_NDS_SCREEN_WIDTH,
+                   SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
 diff --git a/libraries/sim/src/sim_g3_lights.cpp b/libraries/sim/src/sim_g3_lights.cpp
 new file mode 100644
 index 0000000..f296058
@@ -1081,7 +1269,7 @@ index 0000000..678253e
 +
 +}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..bc85db0 100644
+index d968038..7f6014b 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
 @@ -1,8 +1,11 @@
@@ -1096,7 +1284,26 @@ index d968038..bc85db0 100644
  #include <string>
  #include <pthread.h>
  #include <SDL2/SDL.h>
-@@ -155,8 +158,8 @@ static GLuint g2vertexArray;
+@@ -134,12 +137,15 @@ static GLuint fboId;
+ static GLuint g2FrameBuffer;
+ 
+ // Texture Objects
+-GLuint s_bgTextureId[4];
+-GLuint s_objTextureId[5];
++// The main and sub engines each get their own layer textures. They're redrawn
++// one after the other each frame, and sharing them made the second engine's
++// upload wait for the GPU to finish drawing the first
++GLuint s_bgTextureId[2][4];
++GLuint s_objTextureId[2][5];
+ static GLuint g2TextureId;
+ static GLuint g3RenderTextureId;
+ static GLuint dummyScreenTextureId;
+-static GLuint objWindowTextureId;
++static GLuint objWindowTextureId[2];
+ 
+ GLint s_bgTexUnits[] = {0, 1, 2, 3};
+ static GLint s_objTexUnits[] = {4, 5, 6, 7, 8};
+@@ -155,8 +161,8 @@ static GLuint g2vertexArray;
  // VBOs
  static GLuint g2vertexBuffer;
  
@@ -1107,7 +1314,7 @@ index d968038..bc85db0 100644
  
  // Shaders
  static GLint g2VertexShader;
-@@ -293,11 +296,11 @@ void SIM_SetInternalResolution(int internalRes) {
+@@ -293,11 +299,11 @@ void SIM_SetInternalResolution(int internalRes) {
                 SIM_NDS_SCREEN_HEIGHT * 2 * s_SIM_config.internalResolutionScale,
                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
  
@@ -1124,7 +1331,7 @@ index d968038..bc85db0 100644
  }
  
  static bool sChangeInternalResAfterRender = false;
-@@ -314,8 +317,14 @@ void *SIM_RenderInit(void *arg) {
+@@ -314,8 +320,14 @@ void *SIM_RenderInit(void *arg) {
             SDL_INIT_JOYSTICK);
    SIM_Audio_Init(44100);
  
@@ -1139,7 +1346,7 @@ index d968038..bc85db0 100644
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-@@ -378,7 +387,8 @@ void *SIM_RenderInit(void *arg) {
+@@ -378,7 +390,8 @@ void *SIM_RenderInit(void *arg) {
  
    window = SDL_CreateWindow(
        windowTitle.c_str(), 100, 100, windowWidth, windowHeight,
@@ -1149,7 +1356,7 @@ index d968038..bc85db0 100644
    context = SDL_GL_CreateContext(window);
  
    if(s_SIM_config.fullScreen) {
-@@ -392,8 +402,10 @@ void *SIM_RenderInit(void *arg) {
+@@ -392,8 +405,10 @@ void *SIM_RenderInit(void *arg) {
    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
    glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
@@ -1162,7 +1369,52 @@ index d968038..bc85db0 100644
  
    GLenum glErrCode;
    GLint status;
-@@ -498,11 +510,16 @@ void *SIM_RenderInit(void *arg) {
+@@ -401,12 +416,12 @@ void *SIM_RenderInit(void *arg) {
+ 
+   GLchar *errorBuf;
+ 
+-  glGenTextures(4, s_bgTextureId);
++  glGenTextures(8, &s_bgTextureId[0][0]);
+   glActiveTexture(GL_TEXTURE0);
+ 
+-  for (int i = 0; i < 4; i++) {
+-    glActiveTexture(GL_TEXTURE0 + s_bgTexUnits[i]);
+-    glBindTexture(GL_TEXTURE_2D, s_bgTextureId[i]);
++  for (int i = 0; i < 8; i++) {
++    glActiveTexture(GL_TEXTURE0 + s_bgTexUnits[i % 4]);
++    glBindTexture(GL_TEXTURE_2D, s_bgTextureId[i / 4][i % 4]);
+ 
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+@@ -417,12 +432,12 @@ void *SIM_RenderInit(void *arg) {
+                  SIM_NDS_SCREEN_HEIGHT * 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+   }
+ 
+-  glGenTextures(5, s_objTextureId);
++  glGenTextures(10, &s_objTextureId[0][0]);
+   glActiveTexture(GL_TEXTURE0);
+ 
+-  for (int i = 0; i < 5; i++) {
+-    glActiveTexture(GL_TEXTURE0 + s_objTexUnits[i]);
+-    glBindTexture(GL_TEXTURE_2D, s_objTextureId[i]);
++  for (int i = 0; i < 10; i++) {
++    glActiveTexture(GL_TEXTURE0 + s_objTexUnits[i % 5]);
++    glBindTexture(GL_TEXTURE_2D, s_objTextureId[i / 5][i % 5]);
+ 
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+@@ -483,7 +498,9 @@ void *SIM_RenderInit(void *arg) {
+ 
+   GenerateTexture(dummyScreenTextureId, SIM_NDS_SCREEN_WIDTH,
+                   SIM_NDS_SCREEN_HEIGHT * 2);
+-  GenerateTexture(objWindowTextureId, SIM_NDS_SCREEN_WIDTH,
++  GenerateTexture(objWindowTextureId[0], SIM_NDS_SCREEN_WIDTH,
++                  SIM_NDS_SCREEN_HEIGHT * 2);
++  GenerateTexture(objWindowTextureId[1], SIM_NDS_SCREEN_WIDTH,
+                   SIM_NDS_SCREEN_HEIGHT * 2);
+ 
+   // 3D Framebuffer render texture
+@@ -498,11 +515,16 @@ void *SIM_RenderInit(void *arg) {
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                           g3RenderTextureId, 0);
@@ -1183,7 +1435,7 @@ index d968038..bc85db0 100644
  
    // Check FBO status
    int fboStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-@@ -512,7 +529,6 @@ void *SIM_RenderInit(void *arg) {
+@@ -512,7 +534,6 @@ void *SIM_RenderInit(void *arg) {
  
    // Unbind all that stuff
    glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1191,7 +1443,34 @@ index d968038..bc85db0 100644
  
    glBindTexture(GL_TEXTURE_2D, g2TextureId);
  
-@@ -969,7 +985,6 @@ void *SIM_Render(void *arg) {
+@@ -739,7 +760,7 @@ static void DrawEngine(BOOL isSub) {
+   // write all OAMs to the textures based on their priorities
+   for (int i = 0; i < 4; i++) {
+     glActiveTexture(GL_TEXTURE0 + s_objTexUnits[i]);
+-    glBindTexture(GL_TEXTURE_2D, s_objTextureId[i]);
++    glBindTexture(GL_TEXTURE_2D, s_objTextureId[isSub ? 1 : 0][i]);
+     void *oamPixelBuf;
+     switch (i) {
+     case 0:
+@@ -770,7 +791,7 @@ static void DrawEngine(BOOL isSub) {
+     if (bg0as3d) {
+       glBindTexture(GL_TEXTURE_2D, g3RenderTextureId);
+     } else {
+-      glBindTexture(GL_TEXTURE_2D, s_bgTextureId[0]);
++      glBindTexture(GL_TEXTURE_2D, s_bgTextureId[isSub ? 1 : 0][0]);
+     }
+   } else {
+     glBindTexture(GL_TEXTURE_2D, dummyScreenTextureId);
+@@ -778,7 +799,7 @@ static void DrawEngine(BOOL isSub) {
+ 
+   // Setup the OBJWindow texture
+   glActiveTexture(GL_TEXTURE0 + s_objWindowTexUnit);
+-  glBindTexture(GL_TEXTURE_2D, objWindowTextureId);
++  glBindTexture(GL_TEXTURE_2D, objWindowTextureId[isSub ? 1 : 0]);
+   u8 *objWindowBuf = isSub ? objWindowsTex : objWindowTex;
+   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_NDS_SCREEN_WIDTH,
+                   SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
+@@ -969,7 +990,6 @@ void *SIM_Render(void *arg) {
  
      // Unbind 3D Framebuffer
      glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1199,7 +1478,7 @@ index d968038..bc85db0 100644
      glUseProgram(g2shaderProgramID);
  
      glDisable(GL_DEPTH_TEST);
-@@ -982,6 +997,8 @@ void *SIM_Render(void *arg) {
+@@ -982,6 +1002,8 @@ void *SIM_Render(void *arg) {
      int viewX = 0;
      int viewY = 0;
      float aspectRatio;
@@ -1208,7 +1487,7 @@ index d968038..bc85db0 100644
  
      SDL_GetWindowSize(window, &windowWidth, &windowHeight);
  
-@@ -989,15 +1006,19 @@ void *SIM_Render(void *arg) {
+@@ -989,15 +1011,19 @@ void *SIM_Render(void *arg) {
      switch (s_SIM_config.screenLayout) {
      default:
      case SIM_CONFIG_SCREEN_LAYOUT_VERTICAL:
@@ -1231,7 +1510,7 @@ index d968038..bc85db0 100644
  
      viewWidth = windowWidth;
      viewHeight = (int)((float)windowWidth / aspectRatio);
-@@ -1010,7 +1031,38 @@ void *SIM_Render(void *arg) {
+@@ -1010,7 +1036,38 @@ void *SIM_Render(void *arg) {
        viewY = 0;
      }
  
@@ -1271,7 +1550,7 @@ index d968038..bc85db0 100644
  
      // Set up the bounding box of the touch panel
      if (s_SIM_config.swapScreens) {
-@@ -1074,8 +1126,25 @@ void *SIM_Render(void *arg) {
+@@ -1074,8 +1131,25 @@ void *SIM_Render(void *arg) {
            break;
          }
        }
@@ -1297,7 +1576,7 @@ index d968038..bc85db0 100644
          if (keyRead == s_SIM_config.padSettings.aKey) {
            // A Button
            s_reg_PAD_KEYINPUT = s_reg_PAD_KEYINPUT & 0b1111111111111110;
-@@ -1352,9 +1421,8 @@ void *SIM_Render(void *arg) {
+@@ -1352,9 +1426,8 @@ void *SIM_Render(void *arg) {
      glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
    } while (SIM::GUI::IsGameLogicPaused());
