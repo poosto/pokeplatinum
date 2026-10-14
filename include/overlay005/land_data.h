@@ -28,6 +28,7 @@ void LandDataManager_FreeNARCAndLoadedMapBuffers(LandDataManager *landDataMan);
 BOOL LandDataManager_HasEnded(const LandDataManager *landDataMan);
 void LandDataManager_TrackTarget(VecFx32 const *position, LandDataManager *landDataMan);
 void LandDataManager_ForgetTrackedTarget(LandDataManager *landDataMan);
+void LandDataManager_AddMapLampPointLights(const LandDataManager *landDataMan);
 void LandDataManager_GetLoadedMapPropManager(const u8 index, const LandDataManager *landDataMan, MapPropManager **mapPropMan);
 u8 LandDataManager_GetTrackedTargetLoadedMapsQuadrant(const LandDataManager *landDataMan);
 u8 LandDataManager_CalculateMapQuadrantOfTile(const u32 tileIndex, const int mapMatrixWidthTiles);

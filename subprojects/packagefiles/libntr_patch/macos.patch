@@ -10,6 +10,104 @@ index ce31436..97b4603 100644
      u8 masterVolume; /* Master sound volume (0-127) */
      SIM_config_screen_layout_type screenLayout; /* DS screen layout */
      BOOL swapScreens; /* Swap screen positions */
+diff --git a/include/simulator/g3_draw.h b/include/simulator/g3_draw.h
+index 568f0fd..819f176 100644
+--- a/include/simulator/g3_draw.h
++++ b/include/simulator/g3_draw.h
+@@ -24,6 +24,15 @@ typedef struct {
+ 	GLfloat g;
+ 	GLfloat b;
+ 	GLfloat a;
++	//View space position
++	GLfloat vx;
++	GLfloat vy;
++	GLfloat vz;
++	//View space normal, lit is 1 if the polygon uses the DS lights
++	GLfloat nx;
++	GLfloat ny;
++	GLfloat nz;
++	GLfloat lit;
+ } G3SIM_Vertex_t;
+ 
+ #ifdef __cplusplus
+diff --git a/include/simulator/g3_handler.h b/include/simulator/g3_handler.h
+index 6e87d9a..c1319c7 100644
+--- a/include/simulator/g3_handler.h
++++ b/include/simulator/g3_handler.h
+@@ -78,6 +78,14 @@ typedef struct {
+     GLfloat g;
+     GLfloat b;
+     GLfloat a;
++    // View space position and normal, used for point lighting
++    GLfloat vx;
++    GLfloat vy;
++    GLfloat vz;
++    GLfloat nx;
++    GLfloat ny;
++    GLfloat nz;
++    GLfloat lit; // 1 if the polygon uses the DS lights, so has a valid normal
+ } G3SIM_FxVtx_t;
+ 
+ #ifdef __cplusplus
+@@ -147,6 +155,7 @@ int G3SIM_ClipPolygon(fx32 verts[][4], int nVerts, int clipStart, BOOL attribs);
+ u8 G3SIM_SwapBuffersCalledThisFrame();
+ void G3SIM_ResetSwapBuffersCall();
+ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts);
++const G3SIM_Matrix_t * G3SIM_GetProjectionMatrix(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/include/simulator/sim_g3_lights.h b/include/simulator/sim_g3_lights.h
+new file mode 100644
+index 0000000..187e6a6
+--- /dev/null
++++ b/include/simulator/sim_g3_lights.h
+@@ -0,0 +1,45 @@
++#ifndef SIM_G3_LIGHTS_H
++#define SIM_G3_LIGHTS_H
++
++#include <nitro/types.h>
++#include <nitro/fx/fx.h>
++#include <nitro/gx/gxcommon.h>
++
++#define SIM_G3_MAX_POINT_LIGHTS 16
++
++/* A point light added on top of the DS lighting. Positions are in view space
++   (camera relative), the same space the position matrix puts vertices in. */
++typedef struct SIM_G3PointLight {
++    VecFx32 viewPos;
++    fx32 radius;
++    GXRgb color;
++} SIM_G3PointLight;
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Sets the point lights for the current frame. They are cleared when the frame's
++   buffers are swapped, so scenes that stop setting them (battles, menus) don't
++   inherit stale lights. */
++void SIM_G3_SetPointLights(const SIM_G3PointLight * lights, int count);
++
++/* Number of falloff steps, for a banded pixel art look. 0 for smooth falloff */
++void SIM_G3_SetPointLightBands(int bands);
++int SIM_G3_GetPointLightBands(void);
++
++/* Uploads the lights to the 3D shader if they changed */
++void G3SIM_UploadPointLights(void);
++
++/* Clears the per-frame lights. Called on swap buffers */
++void G3SIM_ClearFramePointLights(void);
++
++/* Debug: draw only the point light contribution on opaque 3D polygons */
++void SIM_G3_SetPointLightDebugView(BOOL enabled);
++BOOL SIM_G3_GetPointLightDebugView(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
 diff --git a/include/simulator/sim_rtc.h b/include/simulator/sim_rtc.h
 new file mode 100644
 index 0000000..aa8a647
@@ -98,15 +196,17 @@ index 4282214..d17679b 100644
  
      theDate->year = timeinfo->tm_year - 100;
 diff --git a/libraries/sim/include/gui_internal.hpp b/libraries/sim/include/gui_internal.hpp
-index 0ffc13b..8ae379a 100644
+index 0ffc13b..ace95e0 100644
 --- a/libraries/sim/include/gui_internal.hpp
 +++ b/libraries/sim/include/gui_internal.hpp
-@@ -8,6 +8,8 @@ void AppNetInit();
+@@ -8,6 +8,10 @@ void AppNetInit();
  void AppNetMain(bool * openState);
  void AppPadInit();
  void AppPadMain(bool * openState);
 +void AppClockInit();
 +void AppClockMain(bool * openState);
++void AppLightingInit();
++void AppLightingMain(bool * openState);
  
  }
  
@@ -155,11 +255,54 @@ index 9613af9..247ad41 100644
      fprintf(configFile, "MasterVolume=%d\n", aConfig->masterVolume);
  
      const char * screenLayoutString = ScreenLayoutTypeToString(aConfig->screenLayout);
+diff --git a/libraries/sim/src/g3_draw.cpp b/libraries/sim/src/g3_draw.cpp
+index 2cb19b4..a8d4f29 100644
+--- a/libraries/sim/src/g3_draw.cpp
++++ b/libraries/sim/src/g3_draw.cpp
+@@ -12,6 +12,7 @@
+ #include <nitro/gx/gx_vramcnt.h>
+ #include <unordered_map>
+ #include <simulator/sim_crc32.h>
++#include <simulator/sim_g3_lights.h>
+ #include "simulator/sim_g3_TextureCache.hpp"
+ #include "simulator/sim_g3_Texture.hpp"
+ 
+@@ -157,9 +158,13 @@ void G3SIM_DrawInit()
+ 	glEnableVertexAttribArray(0);
+     glEnableVertexAttribArray(1);
+ 	glEnableVertexAttribArray(2);
++	glEnableVertexAttribArray(3);
++	glEnableVertexAttribArray(4);
+ 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, x));
+     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, s));
+ 	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, r));
++	glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, vx));
++	glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(G3SIM_Vertex_t), (void*)offsetof(G3SIM_Vertex_t, nx));
+ 
+ 	glBindVertexArray(0);
+ 	glDisableVertexAttribArray(0);
+@@ -178,6 +183,8 @@ void G3SIM_FlushArray()
+ 	TracyCZone(FlushArrayZone, 1);
+ 	#endif
+ 
++	G3SIM_UploadPointLights();
++
+ 	u8 * texBuf = nullptr;
+ 	std::shared_ptr<SIM::G3::Texture> texture = nullptr;
+ 
 diff --git a/libraries/sim/src/g3_handler.cpp b/libraries/sim/src/g3_handler.cpp
-index 1ded67d..31888bb 100644
+index 1ded67d..e19aad4 100644
 --- a/libraries/sim/src/g3_handler.cpp
 +++ b/libraries/sim/src/g3_handler.cpp
-@@ -53,6 +53,7 @@ static G3SIM_Matrix_t currentTextureMatrix = {0};
+@@ -20,6 +20,7 @@
+ #include <simulator/g3_handler.h>
+ #include <simulator/g3_draw.h>
+ #include <simulator/sim.h>
++#include <simulator/sim_g3_lights.h>
+ 
+ #ifdef SDK_TRACY_ENABLE
+ #include "tracy/TracyC.h"
+@@ -53,6 +54,7 @@ static G3SIM_Matrix_t currentTextureMatrix = {0};
  static G3SIM_Matrix_t currentClipMatrix = {0};
  
  static u8 s_G3LightColor [4][3];
@@ -167,7 +310,13 @@ index 1ded67d..31888bb 100644
  static float s_G3LightVector[4][3];
  
  u8 s_G3numInPoly = 0;
-@@ -70,6 +71,7 @@ u8 s_g3DiffuseColor[3] = {0};
+@@ -66,10 +68,13 @@ GLfloat s_g3NextTexCoordT;
+ G3SIM_FxVtx_t s_g3PolygonVerts[4];
+ 
+ u8 s_g3CurColor[3] = {0};
++// Last normal, in view space, for point lighting
++static float s_g3CurNormal[3] = {0};
+ u8 s_g3DiffuseColor[3] = {0};
  u8 s_g3AmbientColor[3] = {0};
  u8 s_g3SpecularColor[3] = {0};
  u8 s_g3EmissionColor[3] = {0};
@@ -175,7 +324,7 @@ index 1ded67d..31888bb 100644
  G3SIM_PolygonAttr_t s_curPolygonAttr;
  
  static u8 s_swapBuffersCalledThisFrame;
-@@ -81,6 +83,26 @@ extern u8 s_SIM_useWBuffer;
+@@ -81,6 +86,26 @@ extern u8 s_SIM_useWBuffer;
  
  static void CommonDebugCommandHandling(draw_command_type_t aCommand);
  
@@ -202,7 +351,7 @@ index 1ded67d..31888bb 100644
  static float GetVtxPosition(G3SIM_Vertex_t * vtx, int comp)
  {
      switch(comp){
-@@ -414,7 +436,9 @@ void G3SIM_Begin(GXBegin type)
+@@ -414,7 +439,9 @@ void G3SIM_Begin(GXBegin type)
      }
      snprintf(debugMessage, 50, "GX_Begin %s", typeString);
  
@@ -213,7 +362,7 @@ index 1ded67d..31888bb 100644
      s_primType = type;
      s_G3numInPoly = 0;
      s_G3drawPoly = 0;
-@@ -862,30 +886,16 @@ void G3SIM_LightColor(u32 data)
+@@ -862,30 +889,16 @@ void G3SIM_LightColor(u32 data)
  
  void G3SIM_LightVector(u32 data)
  {
@@ -252,7 +401,7 @@ index 1ded67d..31888bb 100644
  }
  
  //Load Matrix
-@@ -1240,11 +1250,18 @@ void G3SIM_MtxScale(fx32 * scale)
+@@ -1240,11 +1253,18 @@ void G3SIM_MtxScale(fx32 * scale)
      
      G3SIM_Matrix_t * currentMatrix = getCurrentMatrix();
  
@@ -272,7 +421,7 @@ index 1ded67d..31888bb 100644
              if( s_curMtxMode == GX_MTXMODE_POSITION_VECTOR )
              {
                  //Also multiply the position matrix
-@@ -1310,44 +1327,14 @@ void G3SIM_MtxTranslate(fx32* trans)
+@@ -1310,44 +1330,15 @@ void G3SIM_MtxTranslate(fx32* trans)
  
  void G3SIM_Normal(u32 data)
  {
@@ -318,10 +467,11 @@ index 1ded67d..31888bb 100644
 -                    + (normalVectorIn[1] * FX_FX32_TO_F32(currentVectorMatrix.nums[1][2]))
 -                    + (normalVectorIn[2] * FX_FX32_TO_F32(currentVectorMatrix.nums[2][2]));
 +    MultiplyByVectorMatrix(normalVectorIn, normalVector);
++    memcpy(s_g3CurNormal, normalVector, sizeof(s_g3CurNormal));
  
      // Calculate the color
  
-@@ -1362,19 +1349,7 @@ void G3SIM_Normal(u32 data)
+@@ -1362,19 +1353,7 @@ void G3SIM_Normal(u32 data)
          {
              // Light is enabled
  
@@ -342,7 +492,7 @@ index 1ded67d..31888bb 100644
  
              //Calculate Diffuse level
              float diffuseLevel = (lightVector[0] * normalVector[0])
-@@ -1386,10 +1361,23 @@ void G3SIM_Normal(u32 data)
+@@ -1386,10 +1365,23 @@ void G3SIM_Normal(u32 data)
                  diffuseLevel = 0.0f;
              }
  
@@ -369,7 +519,7 @@ index 1ded67d..31888bb 100644
  
              //Diffuse color
              color[0] = color[0] + (((float)s_g3DiffuseColor[0] / 255.0f) * ((float)s_G3LightColor[lightNum][0] / 255.0f) * diffuseLevel); // * DiffuseLevel TODO
-@@ -1483,16 +1471,13 @@ void G3SIM_SpecEmi(u32 data)
+@@ -1483,16 +1475,13 @@ void G3SIM_SpecEmi(u32 data)
      u8 specularRed = (data & 0b11111);
      u8 specularGreen = (data & 0b1111100000) >> 5;
      u8 specularBlue = (data & 0b111110000000000) >> 10;
@@ -389,18 +539,79 @@ index 1ded67d..31888bb 100644
      s_g3SpecularColor[0] = specularRed << 3;
      s_g3SpecularColor[1] = specularGreen << 3;
      s_g3SpecularColor[2] = specularBlue << 3;
+@@ -1507,6 +1496,7 @@ void G3SIM_SwapBuffers(u8 depthBufferMode)
+ {
+     s_SIM_useWBuffer = depthBufferMode;
+     s_swapBuffersCalledThisFrame = TRUE;
++    G3SIM_ClearFramePointLights();
+ }
+ 
+ u8 G3SIM_SwapBuffersCalledThisFrame()
+@@ -1597,6 +1587,23 @@ void G3SIM_Vtx(s16 x, s16 y, s16 z)
+     fxZ = z;
+     fxW = FX32_ONE;
+ 
++    // View space position, i.e. by the position matrix only. Field rendering
++    // keeps the camera in the position matrix (NNS_G3dGlbFlush)
++    float viewPos[3];
++    for (int i = 0; i < 3; i++) {
++        viewPos[i] = (FX_FX32_TO_F32(fxX) * FX_FX32_TO_F32(currentPositionMatrix.nums[0][i]))
++                   + (FX_FX32_TO_F32(fxY) * FX_FX32_TO_F32(currentPositionMatrix.nums[1][i]))
++                   + (FX_FX32_TO_F32(fxZ) * FX_FX32_TO_F32(currentPositionMatrix.nums[2][i]))
++                   + FX_FX32_TO_F32(currentPositionMatrix.nums[3][i]);
++    }
++    s_g3PolygonVerts[s_G3numInPoly].vx = viewPos[0];
++    s_g3PolygonVerts[s_G3numInPoly].vy = viewPos[1];
++    s_g3PolygonVerts[s_G3numInPoly].vz = viewPos[2];
++    s_g3PolygonVerts[s_G3numInPoly].nx = s_g3CurNormal[0];
++    s_g3PolygonVerts[s_G3numInPoly].ny = s_g3CurNormal[1];
++    s_g3PolygonVerts[s_G3numInPoly].nz = s_g3CurNormal[2];
++    s_g3PolygonVerts[s_G3numInPoly].lit = s_curPolygonAttr.lightFlag != 0 ? 1.0f : 0.0f;
++
+     calculateVtxFx(&fxX, &fxY, &fxZ, &fxW);
+ 
+     s_g3PolygonVerts[s_G3numInPoly].x = fxX;
+@@ -1687,6 +1694,13 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+         glVerts[i].g = curVtx->g;
+         glVerts[i].b = curVtx->b;
+         glVerts[i].a = curVtx->a;
++        glVerts[i].vx = curVtx->vx;
++        glVerts[i].vy = curVtx->vy;
++        glVerts[i].vz = curVtx->vz;
++        glVerts[i].nx = curVtx->nx;
++        glVerts[i].ny = curVtx->ny;
++        glVerts[i].nz = curVtx->nz;
++        glVerts[i].lit = curVtx->lit;
+     }
+ 
+     // Get the W size and remove the polygon if W is 0
+@@ -1776,3 +1790,8 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+ 
+ 
+ }
++
++const G3SIM_Matrix_t * G3SIM_GetProjectionMatrix(void)
++{
++    return &currentProjectionMatrix;
++}
 diff --git a/libraries/sim/src/meson.build b/libraries/sim/src/meson.build
-index 80e30d5..41d68c3 100644
+index 80e30d5..e6c396f 100644
 --- a/libraries/sim/src/meson.build
 +++ b/libraries/sim/src/meson.build
-@@ -23,6 +23,7 @@ libsim_srcs = files(
+@@ -20,10 +20,13 @@ libsim_srcs = files(
+     'sim_debug.cpp',
+     'sim_g2.cpp',
+     'sim_g3_CommandProcessor.cpp',
++    'sim_g3_lights.cpp',
      'sim_g3_Texture.cpp',
      'sim_g3_TextureCache.cpp',
      'sim_gui.cpp',
 +    'sim_gui_clock.cpp',
      'sim_gui_config.cpp',
++    'sim_gui_lighting.cpp',
      'sim_gui_net.cpp',
      'sim_gui_pad.cpp',
+     'sim_main.cpp',
 diff --git a/libraries/sim/src/shaders/g2_fragment.glsl b/libraries/sim/src/shaders/g2_fragment.glsl
 index b652bd5..367234f 100644
 --- a/libraries/sim/src/shaders/g2_fragment.glsl
@@ -438,7 +649,7 @@ index fc7a724..f91cee2 100644
 \ No newline at end of file
 +)""
 diff --git a/libraries/sim/src/shaders/g3_fragment.glsl b/libraries/sim/src/shaders/g3_fragment.glsl
-index ffd028a..a675a65 100644
+index ffd028a..64b1b36 100644
 --- a/libraries/sim/src/shaders/g3_fragment.glsl
 +++ b/libraries/sim/src/shaders/g3_fragment.glsl
 @@ -1,5 +1,5 @@
@@ -448,7 +659,84 @@ index ffd028a..a675a65 100644
  
  uniform sampler2D myTexture;
  uniform int useTexture;
-@@ -60,4 +60,4 @@ void main()
+@@ -11,17 +11,63 @@ uniform float fogDensity[32];
+ smooth in vec2 fragTexCoord;
+ smooth in vec4 fragInColor;
+ smooth in vec4 coords;
++noperspective in vec4 fragViewPosOverDepth;
++noperspective in vec4 fragNormalOverDepth;
+ out vec4 color;
+ 
++#define MAX_POINT_LIGHTS 16
++uniform int numPointLights;
++uniform vec4 pointLightPosRadius[MAX_POINT_LIGHTS]; // View space position, radius
++uniform vec3 pointLightColor[MAX_POINT_LIGHTS];
++uniform int pointLightBands;
++uniform int pointLightDebug;
++
++vec3 pointLighting()
++{
++    vec3 viewPos = fragViewPosOverDepth.xyz / fragViewPosOverDepth.w;
++    vec4 normal = fragNormalOverDepth / fragViewPosOverDepth.w;
++    bool hasNormal = normal.w > 0.5 && dot(normal.xyz, normal.xyz) > 0.0;
++    vec3 n = hasNormal ? normalize(normal.xyz) : vec3(0.0);
++    vec3 total = vec3(0.0);
++
++    for(int i = 0; i < numPointLights; i++) {
++        vec3 toLight = pointLightPosRadius[i].xyz - viewPos;
++        float dist = length(toLight);
++        // Bright core with a soft edge that reaches zero at the radius
++        float d = clamp(dist / pointLightPosRadius[i].w, 0.0, 1.0);
++        float falloff = (1.0 - d * d) * (1.0 - d * d);
++        if(pointLightBands > 0) {
++            falloff = floor(falloff * float(pointLightBands) + 0.5) / float(pointLightBands);
++        }
++        // Polygons without DS lighting (sprites, etc) have no normal, so they
++        // get the falloff only
++        float facing = hasNormal ? max(dot(n, toLight / max(dist, 0.001)), 0.0) : 1.0;
++        total += pointLightColor[i] * falloff * facing;
++    }
++    return total;
++}
++
+ void main()
+ {
+     vec4 shadedColor;
++    vec4 vertexColor = fragInColor;
++    // Point lights only touch opaque polygons whose color comes from the vertex
++    // color (modulate, or untextured), so shadows and decals are left alone
++    if(numPointLights > 0 && fragInColor.a > 0.99 && (polygonMode == 0 || useTexture == 0)) {
++        if(pointLightDebug == 1) {
++            color = vec4(pointLighting(), 1.0);
++            return;
++        }
++        // Not clamped here: daytime DS lighting already sits near 1.0, so the
++        // light needs room to brighten past it. The output clamps instead
++        vertexColor.rgb += pointLighting();
++    }
+     if( useTexture == 1 ) {
+         if(polygonMode == 0) {
+-            shadedColor.r = texture(myTexture, fragTexCoord).r * fragInColor.r;
+-            shadedColor.g = texture(myTexture, fragTexCoord).g * fragInColor.g;
+-            shadedColor.b = texture(myTexture, fragTexCoord).b * fragInColor.b;
+-            shadedColor.a = texture(myTexture, fragTexCoord).a * fragInColor.a;
++            shadedColor.r = texture(myTexture, fragTexCoord).r * vertexColor.r;
++            shadedColor.g = texture(myTexture, fragTexCoord).g * vertexColor.g;
++            shadedColor.b = texture(myTexture, fragTexCoord).b * vertexColor.b;
++            shadedColor.a = texture(myTexture, fragTexCoord).a * vertexColor.a;
+         } else {
+             shadedColor = texture(myTexture, fragTexCoord);
+         }
+@@ -29,7 +75,7 @@ void main()
+             discard;
+         }
+     } else {
+-        shadedColor = fragInColor;
++        shadedColor = vertexColor;
+     }
+     
+     if(useFog == 1) {
+@@ -60,4 +106,4 @@ void main()
       color = shadedColor;
      }
  }
@@ -456,29 +744,188 @@ index ffd028a..a675a65 100644
 \ No newline at end of file
 +)""
 diff --git a/libraries/sim/src/shaders/g3_vertex.glsl b/libraries/sim/src/shaders/g3_vertex.glsl
-index e994013..39f3d76 100644
+index e994013..12ced66 100644
 --- a/libraries/sim/src/shaders/g3_vertex.glsl
 +++ b/libraries/sim/src/shaders/g3_vertex.glsl
-@@ -1,5 +1,5 @@
+@@ -1,13 +1,20 @@
  R""(
 -#version 420 core
 +#version 410 core
  
  layout (location = 0) in vec3 position;
  layout (location = 1) in vec2 texCoord;
+ layout (location = 2) in vec4 inColor;
++layout (location = 3) in vec3 inViewPos;
++layout (location = 4) in vec4 inNormal;
+ 
+ smooth out vec2 fragTexCoord;
+ smooth out vec4 fragInColor;
+ smooth out vec4 coords;
++// Positions arrive already divided by W, so these are interpolated linearly in
++// screen space and divided by the interpolated 1/depth in the fragment shader
++// to get perspective correct values
++noperspective out vec4 fragViewPosOverDepth;
++noperspective out vec4 fragNormalOverDepth;
+ 
+ void main()
+ {
+@@ -15,5 +22,9 @@ void main()
+     coords = vec4(position.x, position.y, position.z, 1.0);
+     fragTexCoord = vec2(texCoord.x, texCoord.y);
+     fragInColor = inColor;
++
++    float invDepth = 1.0 / max(-inViewPos.z, 0.001);
++    fragViewPosOverDepth = vec4(inViewPos * invDepth, invDepth);
++    fragNormalOverDepth = inNormal * invDepth;
+ }
+ )""
+diff --git a/libraries/sim/src/sim_g3_lights.cpp b/libraries/sim/src/sim_g3_lights.cpp
+new file mode 100644
+index 0000000..f296058
+--- /dev/null
++++ b/libraries/sim/src/sim_g3_lights.cpp
+@@ -0,0 +1,127 @@
++#include <simulator/sim_g3_lights.h>
++
++#ifdef SDK_BUILD_NX
++#include <glad/glad.h>
++#else
++#include <simulator/glad/glad.h>
++#endif
++
++#include <math.h>
++#include <string.h>
++
++#include <simulator/g3_handler.h>
++
++extern GLuint g3shaderProgramID;
++
++static SIM_G3PointLight sLights[SIM_G3_MAX_POINT_LIGHTS];
++static int sLightCount = 0;
++static int sBands = 8;
++static BOOL sDirty = TRUE;
++static BOOL sDebugView = FALSE;
++
++void SIM_G3_SetPointLights(const SIM_G3PointLight * lights, int count) {
++    if (count > SIM_G3_MAX_POINT_LIGHTS) {
++        count = SIM_G3_MAX_POINT_LIGHTS;
++    }
++    if (count < 0) {
++        count = 0;
++    }
++
++    memcpy(sLights, lights, sizeof(SIM_G3PointLight) * count);
++    sLightCount = count;
++    sDirty = TRUE;
++}
++
++void G3SIM_ClearFramePointLights(void) {
++    if (sLightCount != 0) {
++        sLightCount = 0;
++        sDirty = TRUE;
++    }
++}
++
++void SIM_G3_SetPointLightBands(int bands) {
++    sBands = bands < 0 ? 0 : bands;
++    sDirty = TRUE;
++}
++
++int SIM_G3_GetPointLightBands(void) {
++    return sBands;
++}
++
++static void AddLight(const SIM_G3PointLight * light, float * posRadius, float * color, int index) {
++    posRadius[index * 4 + 0] = FX_FX32_TO_F32(light->viewPos.x);
++    posRadius[index * 4 + 1] = FX_FX32_TO_F32(light->viewPos.y);
++    posRadius[index * 4 + 2] = FX_FX32_TO_F32(light->viewPos.z);
++    posRadius[index * 4 + 3] = FX_FX32_TO_F32(light->radius);
++    color[index * 3 + 0] = (float)(light->color & 0x1F) / 31.0f;
++    color[index * 3 + 1] = (float)((light->color >> 5) & 0x1F) / 31.0f;
++    color[index * 3 + 2] = (float)((light->color >> 10) & 0x1F) / 31.0f;
++}
++
++// Whether the light's sphere reaches into the view frustum of the current
++// projection, so off screen lights don't cost anything in the shader
++static BOOL IsLightInView(const SIM_G3PointLight * light) {
++    const G3SIM_Matrix_t * proj = G3SIM_GetProjectionMatrix();
++    float m[4][4];
++    for (int i = 0; i < 4; i++) {
++        for (int j = 0; j < 4; j++) {
++            m[i][j] = FX_FX32_TO_F32(proj->nums[i][j]);
++        }
++    }
++
++    float x = FX_FX32_TO_F32(light->viewPos.x);
++    float y = FX_FX32_TO_F32(light->viewPos.y);
++    float z = FX_FX32_TO_F32(light->viewPos.z);
++    float radius = FX_FX32_TO_F32(light->radius);
++
++    // Vertices are row vectors (v * M), so each clip component is a column of
++    // M and the frustum planes are w +/- x, y, z
++    for (int k = 0; k < 3; k++) {
++        for (int sign = -1; sign <= 1; sign += 2) {
++            float a = m[0][3] + sign * m[0][k];
++            float b = m[1][3] + sign * m[1][k];
++            float c = m[2][3] + sign * m[2][k];
++            float d = m[3][3] + sign * m[3][k];
++            float len = sqrtf(a * a + b * b + c * c);
++
++            if (len > 0.0f && (a * x + b * y + c * z + d) / len < -radius) {
++                return FALSE;
++            }
++        }
++    }
++    return TRUE;
++}
++
++void G3SIM_UploadPointLights(void) {
++    if (!sDirty) {
++        return;
++    }
++    sDirty = FALSE;
++
++    float posRadius[SIM_G3_MAX_POINT_LIGHTS * 4];
++    float color[SIM_G3_MAX_POINT_LIGHTS * 3];
++    int count = 0;
++
++    for (int i = 0; i < sLightCount; i++) {
++        if (IsLightInView(&sLights[i])) {
++            AddLight(&sLights[i], posRadius, color, count++);
++        }
++    }
++
++    glProgramUniform1i(g3shaderProgramID, glGetUniformLocation(g3shaderProgramID, "pointLightDebug"), sDebugView);
++    glProgramUniform1i(g3shaderProgramID, glGetUniformLocation(g3shaderProgramID, "numPointLights"), count);
++    glProgramUniform1i(g3shaderProgramID, glGetUniformLocation(g3shaderProgramID, "pointLightBands"), sBands);
++    if (count > 0) {
++        glProgramUniform4fv(g3shaderProgramID, glGetUniformLocation(g3shaderProgramID, "pointLightPosRadius"), count, posRadius);
++        glProgramUniform3fv(g3shaderProgramID, glGetUniformLocation(g3shaderProgramID, "pointLightColor"), count, color);
++    }
++}
++
++void SIM_G3_SetPointLightDebugView(BOOL enabled) {
++    sDebugView = enabled;
++    sDirty = TRUE;
++}
++
++BOOL SIM_G3_GetPointLightDebugView(void) {
++    return sDebugView;
++}
 diff --git a/libraries/sim/src/sim_gui.cpp b/libraries/sim/src/sim_gui.cpp
-index 95b3b71..34a88db 100644
+index 95b3b71..fe4bf4e 100644
 --- a/libraries/sim/src/sim_gui.cpp
 +++ b/libraries/sim/src/sim_gui.cpp
-@@ -20,6 +20,7 @@ static constexpr ImVec2 sButtonSize = {100, 20};
+@@ -20,6 +20,8 @@ static constexpr ImVec2 sButtonSize = {100, 20};
  static bool sShowAppConfig = false;
  static bool sShowAppPad = false;
  static bool sShowAppNet = false;
 +static bool sShowAppClock = false;
++static bool sShowAppLighting = false;
  static bool sShowImGuiDemo = false;
  static bool sShowWindowPrjSpecific = false;
  
-@@ -49,7 +50,7 @@ void Init(SDL_Window * window, SDL_GLContext context) {
+@@ -49,7 +51,7 @@ void Init(SDL_Window * window, SDL_GLContext context) {
  
  
  	ImGui_ImplSDL2_InitForOpenGL(sWindow, sContext);
@@ -487,15 +934,16 @@ index 95b3b71..34a88db 100644
    	ImGui_ImplOpenGL3_Init(glsl_version);
  
      ImGui::StyleColorsDark(NULL);
-@@ -74,6 +75,7 @@ void Main() {
+@@ -74,6 +76,8 @@ void Main() {
          AppButton("Config", &sShowAppConfig, AppConfigInit, AppConfigMain);
          AppButton("Input", &sShowAppPad, AppPadInit, AppPadMain);
          AppButton("Multiplayer", &sShowAppNet, AppNetInit, AppNetMain);
 +        AppButton("Clock", &sShowAppClock, AppClockInit, AppClockMain);
++        AppButton("Lighting", &sShowAppLighting, AppLightingInit, AppLightingMain);
          AppButton("ImGui Demo", &sShowImGuiDemo, nullptr, ImGui::ShowDemoWindow);
          AppButton("Application", &sShowWindowPrjSpecific, nullptr, PrjMain);
  
-@@ -157,4 +159,4 @@ void AppButton(const char * label, bool * state, void (*initFunc)(void), void (*
+@@ -157,4 +161,4 @@ void AppButton(const char * label, bool * state, void (*initFunc)(void), void (*
      }
  }
  
@@ -597,6 +1045,41 @@ index 4cc4aa3..e12e3f7 100644
          if(sConfig->fullScreen) {
              SDL_SetWindowFullscreen(SIM_GetSDLWindow(), SDL_WINDOW_FULLSCREEN_DESKTOP);
          } else {
+diff --git a/libraries/sim/src/sim_gui_lighting.cpp b/libraries/sim/src/sim_gui_lighting.cpp
+new file mode 100644
+index 0000000..678253e
+--- /dev/null
++++ b/libraries/sim/src/sim_gui_lighting.cpp
+@@ -0,0 +1,29 @@
++#include "simulator/sim_gui.hpp"
++#include "simulator/sim_g3_lights.h"
++
++#include "simulator/imgui/imgui.hpp"
++
++#include "gui_internal.hpp"
++
++namespace SIM::GUI {
++
++void AppLightingInit() {
++}
++
++void AppLightingMain(bool * openState) {
++    ImGui::Begin("Lighting", openState);
++
++    int bands = SIM_G3_GetPointLightBands();
++    if(ImGui::SliderInt("Falloff bands", &bands, 0, 16, bands == 0 ? "Smooth" : "%d")) {
++        SIM_G3_SetPointLightBands(bands);
++    }
++
++    bool debugView = SIM_G3_GetPointLightDebugView();
++    if(ImGui::Checkbox("Show point light only", &debugView)) {
++        SIM_G3_SetPointLightDebugView(debugView);
++    }
++
++    ImGui::End();
++}
++
++}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
 index d968038..bc85db0 100644
 --- a/libraries/sim/src/sim_main.cpp

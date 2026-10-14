@@ -13,6 +13,7 @@
 #include "overlay005/area_data.h"
 #include "overlay005/area_light.h"
 #include "overlay005/bdhc.h"
+#include "overlay005/field_point_lights.h"
 #include "overlay005/loaded_map_buffers.h"
 #include "overlay005/map_prop.h"
 #include "overlay005/map_prop_animation.h"
@@ -1202,15 +1203,21 @@ static void LandDataManager_QueueLazyLoadNextMapPair(const int trackedTargetMapM
     }
 }
 
+static void LandDataManager_GetLoadedMapRenderingPosition(const u8 index, const LandDataManager *landDataMan, VecFx32 *position)
+{
+    *position = (VecFx32) { 0, 0, 0 };
+
+    LandDataManager_CalculateRenderingPosition(landDataMan->loadedMaps[index]->mapMatrixIndex, landDataMan->mapMatrixWidth, landDataMan->mapMatrix, position);
+
+    position->x += landDataMan->offset.x;
+    position->y += landDataMan->offset.y;
+    position->z += landDataMan->offset.z;
+}
+
 static void LandDataManager_RenderLoadedMap(const u8 index, const LandDataManager *landDataMan, ModelAttributes *const modelAttrs)
 {
-    VecFx32 position = { 0, 0, 0 };
-
-    LandDataManager_CalculateRenderingPosition(landDataMan->loadedMaps[index]->mapMatrixIndex, landDataMan->mapMatrixWidth, landDataMan->mapMatrix, &position);
-
-    position.x += landDataMan->offset.x;
-    position.y += landDataMan->offset.y;
-    position.z += landDataMan->offset.z;
+    VecFx32 position;
+    LandDataManager_GetLoadedMapRenderingPosition(index, landDataMan, &position);
 
     if (landDataMan->loadedMaps[index]->valid == TRUE) {
         VecFx32 scale = { FX32_ONE, FX32_ONE, FX32_ONE };
@@ -1631,6 +1638,22 @@ void LandDataManager_CheckLazyLoadNextMapPair(const u8 trackedTargetDirection, L
         // If the tracked target is about to change quadrant within the same map, queue the next map pair to load.
         LandDataManager_QueueLazyLoadNextMapPair(nextTrackedTargetMapMatrixIndex, trackedTargetDirection, landDataMan);
         LandData_CalculateNextOppositeQuadrant(trackedTargetDirection, landDataMan->trackedTargetMapQuadrant, &landDataMan->trackedTargetLoadedMapsQuadrant);
+    }
+}
+
+void LandDataManager_AddMapLampPointLights(const LandDataManager *landDataMan)
+{
+    for (u8 i = 0; i < QUADRANT_COUNT; i++) {
+        const LoadedMap *loadedMap = landDataMan->loadedMaps[i];
+
+        if (loadedMap->mapMatrixIndex == INVALID_MAP_MATRIX_INDEX || loadedMap->valid != TRUE) {
+            continue;
+        }
+
+        VecFx32 mapPosition;
+        LandDataManager_GetLoadedMapRenderingPosition(i, landDataMan, &mapPosition);
+
+        FieldPointLights_AddMapLamps(MapMatrix_GetLandDataIDByIndex(loadedMap->mapMatrixIndex, landDataMan->mapMatrix), &mapPosition);
     }
 }
 

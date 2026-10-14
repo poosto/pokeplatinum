@@ -18,6 +18,7 @@
 #include "overlay005/field_camera.h"
 #include "overlay005/field_effect_manager.h"
 #include "overlay005/field_effect_renderer.h"
+#include "overlay005/field_point_lights.h"
 #include "overlay005/fog_manager.h"
 #include "overlay005/hblank_system.h"
 #include "overlay005/honey_tree.h"
@@ -689,6 +690,7 @@ static void ov5_021D15F4(FieldSystem *fieldSystem)
     }
 
     PokeRadar_ClearIfAllOutOfView(fieldSystem);
+    FieldPointLights_Update(fieldSystem->landDataMan, AreaDataManager_IsOutdoorsLighting(fieldSystem->areaDataManager));
     LandDataManager_RenderLoadedMaps(fieldSystem->landDataMan, fieldSystem->areaModelAttrs);
 
     if (FieldMap_InDistortionWorld(fieldSystem) == TRUE) {
