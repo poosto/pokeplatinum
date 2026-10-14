@@ -41,6 +41,7 @@ static SIM_G3PointLight sLights[SIM_G3_MAX_POINT_LIGHTS];
 static int sLightCount;
 static GXRgb sLampColor;
 static BOOL sWindowsGlowing;
+static fx32 sNightBrightness;
 
 // How strongly lamps are lit at the current time, from 0 to FX32_ONE
 static fx32 FieldPointLights_CalcBrightness(void)
@@ -77,13 +78,35 @@ void FieldPointLights_AddMapLamps(int landDataID, const VecFx32 *mapPosition)
 
         VecFx32 worldPos;
         VEC_Add(mapPosition, &sFieldMapLamps[i].position, &worldPos);
-
-        SIM_G3PointLight *light = &sLights[sLightCount++];
-        MTX_MultVec43(&worldPos, NNS_G3dGlbGetCameraMtx(), &light->viewPos);
-        light->radius = LAMP_RADIUS;
-        light->color = sLampColor;
+        FieldPointLights_Add(&worldPos, LAMP_RADIUS, sLampColor);
     }
 #endif
+}
+
+void FieldPointLights_Add(const VecFx32 *worldPos, fx32 radius, GXRgb color)
+{
+#ifdef SDK_PORT
+    if (sLightCount >= SIM_G3_MAX_POINT_LIGHTS) {
+        return;
+    }
+
+    SIM_G3PointLight *light = &sLights[sLightCount++];
+    MTX_MultVec43(worldPos, NNS_G3dGlbGetCameraMtx(), &light->viewPos);
+    light->radius = radius;
+    light->color = color;
+#endif
+}
+
+void FieldPointLights_Submit(void)
+{
+#ifdef SDK_PORT
+    SIM_G3_SetPointLights(sLights, sLightCount);
+#endif
+}
+
+fx32 FieldPointLights_GetNightBrightness(void)
+{
+    return sNightBrightness;
 }
 
 // Building window materials are named like h_mado (mado is window) or window01
@@ -114,6 +137,7 @@ void FieldPointLights_Update(const LandDataManager *landDataMan, BOOL isOutdoors
 #ifdef SDK_PORT
     fx32 brightness = isOutdoors ? FieldPointLights_CalcBrightness() : 0;
 
+    sNightBrightness = brightness;
     sWindowsGlowing = brightness != 0;
     SIM_G3_SetGlow(WINDOW_COLOR, FX_Mul(brightness, WINDOW_MAX_STRENGTH));
 
@@ -123,7 +147,5 @@ void FieldPointLights_Update(const LandDataManager *landDataMan, BOOL isOutdoors
     if (brightness != 0) {
         LandDataManager_AddMapLampPointLights(landDataMan);
     }
-
-    SIM_G3_SetPointLights(sLights, sLightCount);
 #endif
 }

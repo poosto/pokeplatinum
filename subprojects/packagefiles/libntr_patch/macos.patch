@@ -31,7 +31,7 @@ index 568f0fd..819f176 100644
  
  #ifdef __cplusplus
 diff --git a/include/simulator/g3_handler.h b/include/simulator/g3_handler.h
-index 6e87d9a..c1319c7 100644
+index 6e87d9a..b2a53eb 100644
 --- a/include/simulator/g3_handler.h
 +++ b/include/simulator/g3_handler.h
 @@ -78,6 +78,14 @@ typedef struct {
@@ -49,11 +49,12 @@ index 6e87d9a..c1319c7 100644
  } G3SIM_FxVtx_t;
  
  #ifdef __cplusplus
-@@ -147,6 +155,7 @@ int G3SIM_ClipPolygon(fx32 verts[][4], int nVerts, int clipStart, BOOL attribs);
+@@ -147,6 +155,8 @@ int G3SIM_ClipPolygon(fx32 verts[][4], int nVerts, int clipStart, BOOL attribs);
  u8 G3SIM_SwapBuffersCalledThisFrame();
  void G3SIM_ResetSwapBuffersCall();
  void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts);
 +const G3SIM_Matrix_t * G3SIM_GetProjectionMatrix(void);
++float G3SIM_ClipToGLDepth(fx32 z, fx32 w);
  
  #ifdef __cplusplus
  }
@@ -73,10 +74,10 @@ index b96f3e0..1e7c9f6 100644
  }
 diff --git a/include/simulator/sim_g3_lights.h b/include/simulator/sim_g3_lights.h
 new file mode 100644
-index 0000000..a2173d2
+index 0000000..7a3316b
 --- /dev/null
 +++ b/include/simulator/sim_g3_lights.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,73 @@
 +#ifndef SIM_G3_LIGHTS_H
 +#define SIM_G3_LIGHTS_H
 +
@@ -84,7 +85,8 @@ index 0000000..a2173d2
 +#include <nitro/fx/fx.h>
 +#include <nitro/gx/gxcommon.h>
 +
-+#define SIM_G3_MAX_POINT_LIGHTS 16
++#define SIM_G3_MAX_POINT_LIGHTS 32
++#define SIM_G3_MAX_GLOW_SPRITES 64
 +
 +/* A point light added on top of the DS lighting. Positions are in view space
 +   (camera relative), the same space the position matrix puts vertices in. */
@@ -102,6 +104,21 @@ index 0000000..a2173d2
 +   buffers are swapped, so scenes that stop setting them (battles, menus) don't
 +   inherit stale lights. */
 +void SIM_G3_SetPointLights(const SIM_G3PointLight * lights, int count);
++
++/* A tiny glowing dot (a firefly) drawn on top of the 3D scene, snapped to the
++   DS pixel grid and hidden behind nearer geometry */
++typedef struct SIM_G3GlowSprite {
++    VecFx32 viewPos;
++    GXRgb color;
++} SIM_G3GlowSprite;
++
++/* Sets the glow sprites for the current frame. They're drawn at the end of the
++   frame, after the buffers are swapped, and replaced by the next frame's */
++void SIM_G3_SetGlowSprites(const SIM_G3GlowSprite * sprites, int count);
++
++/* Called on swap buffers, so the frame being finished draws its own sprites */
++void G3SIM_LatchGlowSprites(void);
++int G3SIM_GetGlowSprites(const SIM_G3GlowSprite ** sprites);
 +
 +/* Polygons drawn with this polygon ID glow with the frame's glow color, for
 +   things like lit windows at night */
@@ -322,10 +339,18 @@ index 9613af9..247ad41 100644
  
      const char * screenLayoutString = ScreenLayoutTypeToString(aConfig->screenLayout);
 diff --git a/libraries/sim/src/g3_draw.cpp b/libraries/sim/src/g3_draw.cpp
-index 2cb19b4..ffa264c 100644
+index 2cb19b4..991210a 100644
 --- a/libraries/sim/src/g3_draw.cpp
 +++ b/libraries/sim/src/g3_draw.cpp
-@@ -11,7 +11,9 @@
+@@ -2,6 +2,7 @@
+ 
+ #include <simulator/g3_handler.h>
+ #include <simulator/assert.h>
++#include <math.h>
+ #include <string.h>
+ #include <stddef.h>
+ #include <memory>
+@@ -11,7 +12,9 @@
  #include <nitro/gx/gx_load.h>
  #include <nitro/gx/gx_vramcnt.h>
  #include <unordered_map>
@@ -335,7 +360,7 @@ index 2cb19b4..ffa264c 100644
  #include "simulator/sim_g3_TextureCache.hpp"
  #include "simulator/sim_g3_Texture.hpp"
  
-@@ -47,7 +49,15 @@ static u32 s_G3DrawItemListCount = 0;
+@@ -47,7 +50,15 @@ static u32 s_G3DrawItemListCount = 0;
  
  static u32 s_G3DrawCurVertIdx = 0;
  static GLuint s_G3DrawVertexArray;
@@ -352,7 +377,7 @@ index 2cb19b4..ffa264c 100644
  
  extern G3SIM_TexImageParam_t s_texImageParam;
  extern G3SIM_PolygonAttr_t s_curPolygonAttr;
-@@ -126,14 +136,38 @@ void G3SIM_AddVtx(G3SIM_Vertex_t * vtx)
+@@ -126,14 +137,133 @@ void G3SIM_AddVtx(G3SIM_Vertex_t * vtx)
  	return;
  }
  
@@ -383,6 +408,101 @@ index 2cb19b4..ffa264c 100644
 +	glDrawArrays(GL_TRIANGLES, 0, count);
 +}
 +
++// Adds a quad covering DS pixels [x, x+1) x [y, y+1) at the given depth
++static int AddGlowPixel(G3SIM_Vertex_t * verts, int x, int y, float depth, const float color[3], float intensity)
++{
++	float x0 = (float)x / 128.0f - 1.0f;
++	float x1 = (float)(x + 1) / 128.0f - 1.0f;
++	float y0 = (float)y / 96.0f - 1.0f;
++	float y1 = (float)(y + 1) / 96.0f - 1.0f;
++	const float corners[6][2] = { {x0, y0}, {x1, y0}, {x1, y1}, {x1, y1}, {x0, y1}, {x0, y0} };
++
++	for (int i = 0; i < 6; i++) {
++		G3SIM_Vertex_t * v = &verts[i];
++		memset(v, 0, sizeof(*v));
++		v->x = corners[i][0];
++		v->y = corners[i][1];
++		v->z = depth;
++		v->r = color[0] * intensity;
++		v->g = color[1] * intensity;
++		v->b = color[2] * intensity;
++		// Below 1 so the shader's point lights skip it; the blend keeps the
++		// framebuffer's alpha anyway
++		v->a = 0.5f;
++		v->vz = -1.0f;
++	}
++	return 6;
++}
++
++// Draws the frame's glow sprites (fireflies) additively, each a bright DS pixel
++// with a dimmer plus around it, depth tested against the scene
++static void DrawGlowSprites()
++{
++	const SIM_G3GlowSprite * sprites;
++	int count = G3SIM_GetGlowSprites(&sprites);
++	if (count == 0) {
++		return;
++	}
++
++	static G3SIM_Vertex_t verts[SIM_G3_MAX_GLOW_SPRITES * 5 * 6];
++	int numVerts = 0;
++	const G3SIM_Matrix_t * proj = G3SIM_GetProjectionMatrix();
++
++	for (int i = 0; i < count; i++) {
++		const VecFx32 * p = &sprites[i].viewPos;
++		fx32 clip[4];
++		for (int j = 0; j < 4; j++) {
++			clip[j] = FX_Mul(p->x, proj->nums[0][j]) + FX_Mul(p->y, proj->nums[1][j])
++			        + FX_Mul(p->z, proj->nums[2][j]) + proj->nums[3][j];
++		}
++		if (clip[3] <= 0) {
++			continue;
++		}
++
++		float ndcX = (float)clip[0] / (float)clip[3];
++		float ndcY = (float)clip[1] / (float)clip[3];
++		if (ndcX < -1.0f || ndcX > 1.0f || ndcY < -1.0f || ndcY > 1.0f) {
++			continue;
++		}
++
++		int px = (int)floorf((ndcX + 1.0f) * 128.0f);
++		int py = (int)floorf((ndcY + 1.0f) * 96.0f);
++		float depth = G3SIM_ClipToGLDepth(clip[2], clip[3]);
++		float color[3] = {
++			(float)(sprites[i].color & 0x1F) / 31.0f,
++			(float)((sprites[i].color >> 5) & 0x1F) / 31.0f,
++			(float)((sprites[i].color >> 10) & 0x1F) / 31.0f,
++		};
++
++		numVerts += AddGlowPixel(&verts[numVerts], px, py, depth, color, 1.0f);
++		numVerts += AddGlowPixel(&verts[numVerts], px - 1, py, depth, color, 0.4f);
++		numVerts += AddGlowPixel(&verts[numVerts], px + 1, py, depth, color, 0.4f);
++		numVerts += AddGlowPixel(&verts[numVerts], px, py - 1, depth, color, 0.4f);
++		numVerts += AddGlowPixel(&verts[numVerts], px, py + 1, depth, color, 0.4f);
++	}
++	if (numVerts == 0) {
++		return;
++	}
++
++	glProgramUniform1i(g3shaderProgramID, glGetUniformLocation(g3shaderProgramID, "useTexture"), 0);
++	glProgramUniform1i(g3shaderProgramID, glGetUniformLocation(g3shaderProgramID, "useFog"), 0);
++	G3SIM_ApplyGlow(0);
++
++	GLboolean cullEnabled = glIsEnabled(GL_CULL_FACE);
++	glDisable(GL_CULL_FACE);
++	glDepthMask(GL_FALSE);
++	// Add the color, leave the 3D layer's alpha alone for the compositor
++	glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
++
++	DrawVerts(verts, numVerts);
++
++	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
++	glDepthMask(GL_TRUE);
++	if (cullEnabled) {
++		glEnable(GL_CULL_FACE);
++	}
++}
++
  void G3SIM_DrawArray()
  {
  	if( s_G3DrawCurVertIdx != 0 )
@@ -395,7 +515,7 @@ index 2cb19b4..ffa264c 100644
  	}
  	return;
  }
-@@ -148,18 +182,11 @@ void G3SIM_DrawInit()
+@@ -148,18 +278,11 @@ void G3SIM_DrawInit()
  	glGenVertexArrays(1, &s_G3DrawVertexArray);
  	glBindVertexArray(s_G3DrawVertexArray);
  
@@ -416,7 +536,7 @@ index 2cb19b4..ffa264c 100644
  
  	glBindVertexArray(0);
  	glDisableVertexAttribArray(0);
-@@ -178,6 +205,9 @@ void G3SIM_FlushArray()
+@@ -178,6 +301,9 @@ void G3SIM_FlushArray()
  	TracyCZone(FlushArrayZone, 1);
  	#endif
  
@@ -426,7 +546,7 @@ index 2cb19b4..ffa264c 100644
  	u8 * texBuf = nullptr;
  	std::shared_ptr<SIM::G3::Texture> texture = nullptr;
  
-@@ -189,7 +219,7 @@ void G3SIM_FlushArray()
+@@ -189,7 +315,7 @@ void G3SIM_FlushArray()
  		u16 * colorAddr = (u16*)vramPltt;
  
  		//Calculate the texture + palette CRC
@@ -435,7 +555,7 @@ index 2cb19b4..ffa264c 100644
  		u32 vramTexBufSize = 0;
  
  		if(s_texImageParam.textureFormat == GX_TEXFMT_PLTT4) {
-@@ -200,7 +230,7 @@ void G3SIM_FlushArray()
+@@ -200,7 +326,7 @@ void G3SIM_FlushArray()
  			vramTexBufSize = (s_texImageParam.textureSSize * s_texImageParam.textureTSize);
  		}
  
@@ -444,7 +564,7 @@ index 2cb19b4..ffa264c 100644
  		texture = sTextureCache.GetTexture(textureCRC, paletteCRC);
  		if(texture == nullptr) {
  			// decode texture and create it in the cache
-@@ -403,13 +433,14 @@ void G3SIM_DrawItems()
+@@ -403,13 +529,16 @@ void G3SIM_DrawItems()
  		// Set the polygon mode in the shader
  		GLint polygonModeLoc = glGetUniformLocation(g3shaderProgramID, "polygonMode");
  		glProgramUniform1i(g3shaderProgramID, polygonModeLoc, item->polygonAttr.polygonMode);
@@ -460,12 +580,14 @@ index 2cb19b4..ffa264c 100644
  	}
  	s_G3DrawItemListCount = 0;
 +
++	DrawGlowSprites();
++
 +	// The frame's draws are all queued, so the buffers can be reused next frame
 +	s_G3DrawStreamBufferIdx = 0;
  }
 \ No newline at end of file
 diff --git a/libraries/sim/src/g3_handler.cpp b/libraries/sim/src/g3_handler.cpp
-index 1ded67d..484150e 100644
+index 1ded67d..b6357c2 100644
 --- a/libraries/sim/src/g3_handler.cpp
 +++ b/libraries/sim/src/g3_handler.cpp
 @@ -20,6 +20,8 @@
@@ -733,17 +855,18 @@ index 1ded67d..484150e 100644
      s_g3SpecularColor[0] = specularRed << 3;
      s_g3SpecularColor[1] = specularGreen << 3;
      s_g3SpecularColor[2] = specularBlue << 3;
-@@ -1507,6 +1499,9 @@ void G3SIM_SwapBuffers(u8 depthBufferMode)
+@@ -1507,6 +1499,10 @@ void G3SIM_SwapBuffers(u8 depthBufferMode)
  {
      s_SIM_useWBuffer = depthBufferMode;
      s_swapBuffersCalledThisFrame = TRUE;
 +    G3SIM_ClearFramePointLights();
 +    G3SIM_ClearFrameGlow();
 +    G3SIM_PostFX_LatchFrame();
++    G3SIM_LatchGlowSprites();
  }
  
  u8 G3SIM_SwapBuffersCalledThisFrame()
-@@ -1597,6 +1592,23 @@ void G3SIM_Vtx(s16 x, s16 y, s16 z)
+@@ -1597,6 +1593,23 @@ void G3SIM_Vtx(s16 x, s16 y, s16 z)
      fxZ = z;
      fxW = FX32_ONE;
  
@@ -767,7 +890,7 @@ index 1ded67d..484150e 100644
      calculateVtxFx(&fxX, &fxY, &fxZ, &fxW);
  
      s_g3PolygonVerts[s_G3numInPoly].x = fxX;
-@@ -1687,6 +1699,13 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+@@ -1687,6 +1700,13 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
          glVerts[i].g = curVtx->g;
          glVerts[i].b = curVtx->b;
          glVerts[i].a = curVtx->a;
@@ -781,7 +904,7 @@ index 1ded67d..484150e 100644
      }
  
      // Get the W size and remove the polygon if W is 0
-@@ -1776,3 +1795,8 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+@@ -1776,3 +1796,26 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
  
  
  }
@@ -789,6 +912,24 @@ index 1ded67d..484150e 100644
 +const G3SIM_Matrix_t * G3SIM_GetProjectionMatrix(void)
 +{
 +    return &currentProjectionMatrix;
++}
++
++// GL depth for a clip space position, the same way G3SIM_SubmitPolygon computes
++// it in Z buffer mode
++float G3SIM_ClipToGLDepth(fx32 z, fx32 w)
++{
++    w &= 0x00FFFFFF;
++    if (w == 0) {
++        return 1.0f;
++    }
++
++    s32 depth = ((((s64)z * 0x4000) / w) + 0x3FFF) * 0x200;
++    if (depth < 0) {
++        depth = 0;
++    } else if (depth > 0xFFFFFF) {
++        depth = 0xFFFFFF;
++    }
++    return (((float)depth / 16777215.0f) * 2.0f) - 1.0f;
 +}
 diff --git a/libraries/sim/src/meson.build b/libraries/sim/src/meson.build
 index 80e30d5..5e61efb 100644
@@ -1000,7 +1141,7 @@ index fc7a724..f91cee2 100644
 \ No newline at end of file
 +)""
 diff --git a/libraries/sim/src/shaders/g3_fragment.glsl b/libraries/sim/src/shaders/g3_fragment.glsl
-index ffd028a..ce5982d 100644
+index ffd028a..e9b1d66 100644
 --- a/libraries/sim/src/shaders/g3_fragment.glsl
 +++ b/libraries/sim/src/shaders/g3_fragment.glsl
 @@ -1,5 +1,5 @@
@@ -1018,7 +1159,7 @@ index ffd028a..ce5982d 100644
 +noperspective in vec4 fragNormalOverDepth;
  out vec4 color;
  
-+#define MAX_POINT_LIGHTS 16
++#define MAX_POINT_LIGHTS 32
 +uniform int numPointLights;
 +uniform vec4 pointLightPosRadius[MAX_POINT_LIGHTS]; // View space position, radius
 +uniform vec3 pointLightColor[MAX_POINT_LIGHTS];
@@ -1212,10 +1353,10 @@ index 86cd85e..7b71aab 100644
                    SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
 diff --git a/libraries/sim/src/sim_g3_lights.cpp b/libraries/sim/src/sim_g3_lights.cpp
 new file mode 100644
-index 0000000..726f084
+index 0000000..1be4270
 --- /dev/null
 +++ b/libraries/sim/src/sim_g3_lights.cpp
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,174 @@
 +#include <simulator/sim_g3_lights.h>
 +
 +#ifdef SDK_BUILD_NX
@@ -1362,6 +1503,33 @@ index 0000000..726f084
 +    static GLint glowColorLoc = glGetUniformLocation(g3shaderProgramID, "glowColor");
 +    glProgramUniform4f(g3shaderProgramID, glowColorLoc,
 +        sGlowColor[0], sGlowColor[1], sGlowColor[2], glow ? sGlowColor[3] : 0.0f);
++}
++
++static SIM_G3GlowSprite sPendingSprites[SIM_G3_MAX_GLOW_SPRITES];
++static int sPendingSpriteCount = 0;
++static SIM_G3GlowSprite sFrameSprites[SIM_G3_MAX_GLOW_SPRITES];
++static int sFrameSpriteCount = 0;
++
++void SIM_G3_SetGlowSprites(const SIM_G3GlowSprite * sprites, int count) {
++    if (count > SIM_G3_MAX_GLOW_SPRITES) {
++        count = SIM_G3_MAX_GLOW_SPRITES;
++    }
++    if (count < 0) {
++        count = 0;
++    }
++    memcpy(sPendingSprites, sprites, sizeof(SIM_G3GlowSprite) * count);
++    sPendingSpriteCount = count;
++}
++
++void G3SIM_LatchGlowSprites(void) {
++    memcpy(sFrameSprites, sPendingSprites, sizeof(SIM_G3GlowSprite) * sPendingSpriteCount);
++    sFrameSpriteCount = sPendingSpriteCount;
++    sPendingSpriteCount = 0;
++}
++
++int G3SIM_GetGlowSprites(const SIM_G3GlowSprite ** sprites) {
++    *sprites = sFrameSprites;
++    return sFrameSpriteCount;
 +}
 diff --git a/libraries/sim/src/sim_gui.cpp b/libraries/sim/src/sim_gui.cpp
 index 95b3b71..8f57607 100644
