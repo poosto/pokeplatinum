@@ -1036,10 +1036,10 @@ index 6e87d9a..b2a53eb 100644
  #ifdef __cplusplus
  }
 diff --git a/include/simulator/sim.h b/include/simulator/sim.h
-index 2eb2a3e..ad45bd3 100644
+index 2eb2a3e..9628bc8 100644
 --- a/include/simulator/sim.h
 +++ b/include/simulator/sim.h
-@@ -75,6 +75,21 @@ SIM_config_type * SIM_GetConfigPtr();
+@@ -75,6 +75,23 @@ SIM_config_type * SIM_GetConfigPtr();
  u64 SIM_GetRenderFrameTime();
  u64 SIM_GetFullFrameTime();
  const char * SIM_GetLibntrGitHash();
@@ -1053,11 +1053,13 @@ index 2eb2a3e..ad45bd3 100644
 +    int current;
 +    u32 hash;
 +    BOOL uploaded;
++    BOOL uploadedTopHalf;
 +} SIM_LayerTexture;
 +
 +/* Binds the layer's texture to the active texture unit, uploading the pixels
-+   (both screens, RGBA) first if they changed */
-+void SIM_BindLayerTexture(SIM_LayerTexture * layer, const u8 * pixels);
++   (RGBA, both screens stacked) first if they changed. An engine only draws to
++   its own screen's half, so only that half is checked and uploaded. */
++void SIM_BindLayerTexture(SIM_LayerTexture * layer, const u8 * pixels, BOOL isSub);
  const char * SIM_GetProjectGitHash();
  SDL_Window * SIM_GetSDLWindow();
  
@@ -2418,7 +2420,7 @@ index e994013..12ced66 100644
  }
  )""
 diff --git a/libraries/sim/src/sim_crc32.c b/libraries/sim/src/sim_crc32.c
-index ed806e9..930dff1 100644
+index ed806e9..fa49c70 100644
 --- a/libraries/sim/src/sim_crc32.c
 +++ b/libraries/sim/src/sim_crc32.c
 @@ -1,5 +1,11 @@
@@ -2433,7 +2435,7 @@ index ed806e9..930dff1 100644
  
  #define UPDC32(octet,crc) (crc_32_tab[((crc)\
       ^ ((u8)octet)) & 0xff] ^ ((crc) >> 8))
-@@ -68,4 +74,26 @@ u32 SIM_crc32buf(u8 *buf, size_t len)
+@@ -68,4 +74,45 @@ u32 SIM_crc32buf(u8 *buf, size_t len)
  
        return ~oldcrc32;
        
@@ -2444,26 +2446,45 @@ index ed806e9..930dff1 100644
 +u32 SIM_hashbuf(const u8 *buf, size_t len)
 +{
 +#if defined(__ARM_FEATURE_CRC32)
-+      u32 crc = 0xFFFFFFFF;
++      // Four independent CRC streams over four quarters of the buffer. One
++      // stream is limited by the instruction's latency, four keep the CRC unit
++      // busy, then the four results are folded together
++      u32 crc0 = 0xFFFFFFFF, crc1 = 0xFFFFFFFF, crc2 = 0xFFFFFFFF, crc3 = 0xFFFFFFFF;
++      size_t lane = (len / 32) * 8;
++      const u8 *p0 = buf;
++      const u8 *p1 = buf + lane;
++      const u8 *p2 = buf + lane * 2;
++      const u8 *p3 = buf + lane * 3;
 +
-+      for ( ; len >= 8; len -= 8, buf += 8)
++      for (size_t i = 0; i < lane; i += 8)
 +      {
-+            u64 chunk;
-+            memcpy(&chunk, buf, sizeof(chunk));
-+            crc = __crc32cd(crc, chunk);
-+      }
-+      for ( ; len; --len, ++buf)
-+      {
-+            crc = __crc32cb(crc, *buf);
++            u64 w0, w1, w2, w3;
++            memcpy(&w0, p0 + i, sizeof(w0));
++            memcpy(&w1, p1 + i, sizeof(w1));
++            memcpy(&w2, p2 + i, sizeof(w2));
++            memcpy(&w3, p3 + i, sizeof(w3));
++            crc0 = __crc32cd(crc0, w0);
++            crc1 = __crc32cd(crc1, w1);
++            crc2 = __crc32cd(crc2, w2);
++            crc3 = __crc32cd(crc3, w3);
 +      }
 +
-+      return ~crc;
++      const u8 *tail = buf + lane * 4;
++      for (size_t rest = len - lane * 4; rest; --rest, ++tail)
++      {
++            crc0 = __crc32cb(crc0, *tail);
++      }
++
++      u32 result = __crc32cw(crc0, crc1);
++      result = __crc32cw(result, crc2);
++      result = __crc32cw(result, crc3);
++      return ~result;
 +#else
 +      return SIM_crc32buf((u8 *)buf, len);
 +#endif
 +}
 diff --git a/libraries/sim/src/sim_g2.cpp b/libraries/sim/src/sim_g2.cpp
-index 86cd85e..fb5286a 100644
+index 86cd85e..956b3f4 100644
 --- a/libraries/sim/src/sim_g2.cpp
 +++ b/libraries/sim/src/sim_g2.cpp
 @@ -39,8 +39,7 @@ extern u8 s_SIM_DBG_OAMSenable;
@@ -2485,7 +2506,7 @@ index 86cd85e..fb5286a 100644
 -  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_NDS_SCREEN_WIDTH,
 -                  SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
 -                  (void *)bgTexBuf);
-+  SIM_BindLayerTexture(&s_bgLayers[isSub ? 1 : 0][bgNum], bgTexBuf);
++  SIM_BindLayerTexture(&s_bgLayers[isSub ? 1 : 0][bgNum], bgTexBuf, isSub);
  #ifdef SDK_TRACY_ENABLE
    TracyCZoneEnd(ctx);
  #endif
@@ -2850,7 +2871,7 @@ index 0000000..5b9c859
 +
 +}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..26c905a 100644
+index d968038..c7cfc32 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
 @@ -1,8 +1,11 @@
@@ -3055,7 +3076,7 @@ index d968038..26c905a 100644
  
    glBindTexture(GL_TEXTURE_2D, g2TextureId);
  
-@@ -557,6 +559,41 @@ void *SIM_RenderInit(void *arg) {
+@@ -557,6 +559,48 @@ void *SIM_RenderInit(void *arg) {
    return nullptr;
  }
  
@@ -3077,18 +3098,25 @@ index d968038..26c905a 100644
 +  layer->uploaded = FALSE;
 +}
 +
-+void SIM_BindLayerTexture(SIM_LayerTexture *layer, const u8 *pixels) {
-+  const size_t size = 4 * SIM_NDS_SCREEN_WIDTH * SIM_NDS_SCREEN_HEIGHT * 2;
-+  u32 hash = SIM_hashbuf(pixels, size);
++void SIM_BindLayerTexture(SIM_LayerTexture *layer, const u8 *pixels,
++                          BOOL isSub) {
++  // Same rule as G2SIM_PlotPixel: the top screen is the second half of the
++  // buffer
++  BOOL topHalf = (s_reg_GX_POWCNT >> 15) ? !isSub : isSub;
++  const int rowStart = topHalf ? SIM_NDS_SCREEN_HEIGHT : 0;
++  const size_t rowBytes = 4 * SIM_NDS_SCREEN_WIDTH;
++  const u8 *half = pixels + rowStart * rowBytes;
++  u32 hash = SIM_hashbuf(half, rowBytes * SIM_NDS_SCREEN_HEIGHT);
 +
-+  if (!layer->uploaded || hash != layer->hash) {
++  if (!layer->uploaded || hash != layer->hash ||
++      topHalf != layer->uploadedTopHalf) {
 +    layer->current ^= 1;
 +    glBindTexture(GL_TEXTURE_2D, layer->textures[layer->current]);
-+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_NDS_SCREEN_WIDTH,
-+                    SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
-+                    pixels);
++    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, rowStart, SIM_NDS_SCREEN_WIDTH,
++                    SIM_NDS_SCREEN_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, half);
 +    layer->hash = hash;
 +    layer->uploaded = TRUE;
++    layer->uploadedTopHalf = topHalf;
 +  } else {
 +    glBindTexture(GL_TEXTURE_2D, layer->textures[layer->current]);
 +  }
@@ -3097,7 +3125,7 @@ index d968038..26c905a 100644
  static void DrawEngine(BOOL isSub) {
    const char *zoneName;
    zoneName = isSub ? "DrawEngine (SUB)" : "DrawEngine (MAIN)";
-@@ -739,8 +776,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -739,8 +783,7 @@ static void DrawEngine(BOOL isSub) {
    // write all OAMs to the textures based on their priorities
    for (int i = 0; i < 4; i++) {
      glActiveTexture(GL_TEXTURE0 + s_objTexUnits[i]);
@@ -3107,18 +3135,18 @@ index d968038..26c905a 100644
      switch (i) {
      case 0:
        oamPixelBuf = isSub ? oam0sTex : oam0Tex;
-@@ -759,9 +795,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -759,9 +802,7 @@ static void DrawEngine(BOOL isSub) {
        oamPixelBuf = NULL;
        break;
      }
 -    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_NDS_SCREEN_WIDTH,
 -                    SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
 -                    (void *)oamPixelBuf);
-+    SIM_BindLayerTexture(&s_objLayers[isSub ? 1 : 0][i], oamPixelBuf);
++    SIM_BindLayerTexture(&s_objLayers[isSub ? 1 : 0][i], oamPixelBuf, isSub);
    }
  
    glActiveTexture(GL_TEXTURE0 + s_bgTexUnits[0]);
-@@ -770,7 +804,8 @@ static void DrawEngine(BOOL isSub) {
+@@ -770,7 +811,8 @@ static void DrawEngine(BOOL isSub) {
      if (bg0as3d) {
        glBindTexture(GL_TEXTURE_2D, g3RenderTextureId);
      } else {
@@ -3128,7 +3156,7 @@ index d968038..26c905a 100644
      }
    } else {
      glBindTexture(GL_TEXTURE_2D, dummyScreenTextureId);
-@@ -778,11 +813,8 @@ static void DrawEngine(BOOL isSub) {
+@@ -778,11 +820,8 @@ static void DrawEngine(BOOL isSub) {
  
    // Setup the OBJWindow texture
    glActiveTexture(GL_TEXTURE0 + s_objWindowTexUnit);
@@ -3137,11 +3165,11 @@ index d968038..26c905a 100644
 -  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_NDS_SCREEN_WIDTH,
 -                  SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
 -                  (void *)objWindowBuf);
-+  SIM_BindLayerTexture(&s_objWindowLayers[isSub ? 1 : 0], objWindowBuf);
++  SIM_BindLayerTexture(&s_objWindowLayers[isSub ? 1 : 0], objWindowBuf, isSub);
    glProgramUniform1i(
        g2shaderProgramID,
        glGetUniformLocation(g2shaderProgramID, "objWindowTexture"),
-@@ -818,6 +850,18 @@ static void DrawEngine(BOOL isSub) {
+@@ -818,6 +857,18 @@ static void DrawEngine(BOOL isSub) {
                       glGetUniformLocation(g2shaderProgramID, "bg0as3d"),
                       bg0as3d);
  
@@ -3160,7 +3188,7 @@ index d968038..26c905a 100644
    // Pass master bright info to the shader
    float masterBrightFactor = isSub
                                   ? (float)(s_reg_GXS_DB_MASTER_BRIGHT & 0b11111)
-@@ -969,7 +1013,6 @@ void *SIM_Render(void *arg) {
+@@ -969,7 +1020,6 @@ void *SIM_Render(void *arg) {
  
      // Unbind 3D Framebuffer
      glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3168,7 +3196,7 @@ index d968038..26c905a 100644
      glUseProgram(g2shaderProgramID);
  
      glDisable(GL_DEPTH_TEST);
-@@ -982,6 +1025,8 @@ void *SIM_Render(void *arg) {
+@@ -982,6 +1032,8 @@ void *SIM_Render(void *arg) {
      int viewX = 0;
      int viewY = 0;
      float aspectRatio;
@@ -3177,7 +3205,7 @@ index d968038..26c905a 100644
  
      SDL_GetWindowSize(window, &windowWidth, &windowHeight);
  
-@@ -989,15 +1034,19 @@ void *SIM_Render(void *arg) {
+@@ -989,15 +1041,19 @@ void *SIM_Render(void *arg) {
      switch (s_SIM_config.screenLayout) {
      default:
      case SIM_CONFIG_SCREEN_LAYOUT_VERTICAL:
@@ -3200,7 +3228,7 @@ index d968038..26c905a 100644
  
      viewWidth = windowWidth;
      viewHeight = (int)((float)windowWidth / aspectRatio);
-@@ -1010,7 +1059,38 @@ void *SIM_Render(void *arg) {
+@@ -1010,7 +1066,38 @@ void *SIM_Render(void *arg) {
        viewY = 0;
      }
  
@@ -3240,7 +3268,7 @@ index d968038..26c905a 100644
  
      // Set up the bounding box of the touch panel
      if (s_SIM_config.swapScreens) {
-@@ -1074,8 +1154,25 @@ void *SIM_Render(void *arg) {
+@@ -1074,8 +1161,25 @@ void *SIM_Render(void *arg) {
            break;
          }
        }
@@ -3266,7 +3294,7 @@ index d968038..26c905a 100644
          if (keyRead == s_SIM_config.padSettings.aKey) {
            // A Button
            s_reg_PAD_KEYINPUT = s_reg_PAD_KEYINPUT & 0b1111111111111110;
-@@ -1352,9 +1449,8 @@ void *SIM_Render(void *arg) {
+@@ -1352,9 +1456,8 @@ void *SIM_Render(void *arg) {
      glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
    } while (SIM::GUI::IsGameLogicPaused());
