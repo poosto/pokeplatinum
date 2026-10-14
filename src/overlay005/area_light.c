@@ -18,7 +18,11 @@
 #define SCRATCH_BUFFER_SIZE   256
 #define INVALID_LIGHT_COLOR   0xFFFF
 
-static void AreaLightManager_ApplyActiveTemplateToAreaModelAttrs(AreaLightManager *areaLightMan);
+// Template end times are stored in 2-second units
+#define TEMPLATE_TIME_TO_SECONDS(time) ((time) * 2)
+
+static int AreaLightManager_FindTemplateIndex(const AreaLightManager *areaLightMan, int currentTime);
+static void AreaLightManager_ApplyBlendedTemplateToAreaModelAttrs(AreaLightManager *areaLightMan, int secondsSinceMidnight);
 static u32 AreaLightTemplate_New(u32 archiveID, AreaLightTemplate **templates);
 static void AreaLightTemplate_Free(AreaLightTemplate **template);
 static char *AreaLightTemplate_ParseLightAttrs(char *fileIter, GXRgb *lightColor, VecFx16 *lightVector);
@@ -32,19 +36,12 @@ AreaLightManager *AreaLightManager_New(ModelAttributes *areaModelAttrs, const u8
 
     areaLightMan->areaModelAttrs = areaModelAttrs;
     areaLightMan->templateCount = AreaLightTemplate_New(archiveID, &areaLightMan->templates);
-    areaLightMan->activeTemplateIndex = 0;
 
-    int currentTime = GetSecondsSinceMidnight() / 2;
-
-    for (int i = 0; i < areaLightMan->templateCount; i++) {
-        if (areaLightMan->templates[i].endTime > currentTime) {
-            areaLightMan->activeTemplateIndex = i;
-            break;
-        }
-    }
+    int secondsSinceMidnight = GetSecondsSinceMidnight();
+    areaLightMan->activeTemplateIndex = AreaLightManager_FindTemplateIndex(areaLightMan, secondsSinceMidnight / 2);
 
     areaLightMan->applyToAreaModelAttrs = TRUE;
-    AreaLightManager_ApplyActiveTemplateToAreaModelAttrs(areaLightMan);
+    AreaLightManager_ApplyBlendedTemplateToAreaModelAttrs(areaLightMan, secondsSinceMidnight);
 
     return areaLightMan;
 }
@@ -63,25 +60,15 @@ void AreaLightManager_UpdateActiveTemplate(AreaLightManager *areaLightMan)
 {
     GF_ASSERT(areaLightMan);
 
-    int currentTime = GetSecondsSinceMidnight() / 2;
+    int secondsSinceMidnight = GetSecondsSinceMidnight();
 
     if (areaLightMan->templateCount > 1) {
-        int previousEndTime = areaLightMan->activeTemplateIndex - 1 >= 0
-            ? areaLightMan->templates[areaLightMan->activeTemplateIndex - 1].endTime
-            : 0;
+        // Looked up from scratch rather than stepped, so jumps in time (e.g. the
+        // clock override) land on the right template immediately
+        areaLightMan->activeTemplateIndex = AreaLightManager_FindTemplateIndex(areaLightMan, secondsSinceMidnight / 2);
 
-        int activeEndTime = areaLightMan->templates[areaLightMan->activeTemplateIndex].endTime;
-
-        if (currentTime >= activeEndTime || currentTime < previousEndTime) {
-            areaLightMan->activeTemplateIndex++;
-
-            if (areaLightMan->activeTemplateIndex >= areaLightMan->templateCount) {
-                areaLightMan->activeTemplateIndex = 0;
-            }
-
-            if (areaLightMan->applyToAreaModelAttrs) {
-                AreaLightManager_ApplyActiveTemplateToAreaModelAttrs(areaLightMan);
-            }
+        if (areaLightMan->applyToAreaModelAttrs && secondsSinceMidnight != areaLightMan->lastAppliedSeconds) {
+            AreaLightManager_ApplyBlendedTemplateToAreaModelAttrs(areaLightMan, secondsSinceMidnight);
         }
     }
 }
@@ -106,10 +93,109 @@ void AreaLightTemplate_ApplyToModelAttributes(const AreaLightTemplate *template,
     ModelAttributes_SetEmissionColor(modelAttrs, template->emissionColor, TRUE);
 }
 
-static void AreaLightManager_ApplyActiveTemplateToAreaModelAttrs(AreaLightManager *areaLightMan)
+static int AreaLightManager_GetTemplateStartTime(const AreaLightManager *areaLightMan, int index)
 {
-    AreaLightTemplate *activeTemplate = &areaLightMan->templates[areaLightMan->activeTemplateIndex];
-    AreaLightTemplate_ApplyToModelAttributes(activeTemplate, areaLightMan->areaModelAttrs);
+    return index > 0 ? areaLightMan->templates[index - 1].endTime : 0;
+}
+
+static int AreaLightManager_FindTemplateIndex(const AreaLightManager *areaLightMan, int currentTime)
+{
+    for (int i = 0; i < areaLightMan->templateCount; i++) {
+        if (areaLightMan->templates[i].endTime > currentTime) {
+            return i;
+        }
+    }
+
+    return areaLightMan->templateCount - 1;
+}
+
+// The template that follows the given one, wrapping past midnight. Templates
+// whose time range is empty are never active, so they are skipped.
+static int AreaLightManager_GetNextTemplateIndex(const AreaLightManager *areaLightMan, int index)
+{
+    int next = index;
+
+    for (int i = 0; i < areaLightMan->templateCount; i++) {
+        next = (next + 1) % areaLightMan->templateCount;
+
+        if (areaLightMan->templates[next].endTime > AreaLightManager_GetTemplateStartTime(areaLightMan, next)) {
+            return next;
+        }
+    }
+
+    return index;
+}
+
+static int BlendChannel(int from, int to, fx32 t)
+{
+    return (from * (FX32_ONE - t) + to * t + (FX32_ONE >> 1)) >> FX32_SHIFT;
+}
+
+static GXRgb BlendColor(GXRgb from, GXRgb to, fx32 t)
+{
+    int r = BlendChannel(from & 0x1F, to & 0x1F, t);
+    int g = BlendChannel((from >> 5) & 0x1F, (to >> 5) & 0x1F, t);
+    int b = BlendChannel((from >> 10) & 0x1F, (to >> 10) & 0x1F, t);
+
+    return GX_RGB(r, g, b);
+}
+
+static void BlendLightVector(const VecFx16 *from, const VecFx16 *to, fx32 t, VecFx16 *out)
+{
+    out->x = BlendChannel(from->x, to->x, t);
+    out->y = BlendChannel(from->y, to->y, t);
+    out->z = BlendChannel(from->z, to->z, t);
+
+    if (out->x != 0 || out->y != 0 || out->z != 0) {
+        VEC_Fx16Normalize(out, out);
+    }
+}
+
+// Lights the area with the active template blended toward the next one by how
+// far into the active template's time range we are, so the lighting changes
+// smoothly instead of snapping when a template ends
+static void AreaLightManager_ApplyBlendedTemplateToAreaModelAttrs(AreaLightManager *areaLightMan, int secondsSinceMidnight)
+{
+    int activeIndex = areaLightMan->activeTemplateIndex;
+    const AreaLightTemplate *from = &areaLightMan->templates[activeIndex];
+    const AreaLightTemplate *to = &areaLightMan->templates[AreaLightManager_GetNextTemplateIndex(areaLightMan, activeIndex)];
+
+    int startSeconds = TEMPLATE_TIME_TO_SECONDS(AreaLightManager_GetTemplateStartTime(areaLightMan, activeIndex));
+    int endSeconds = TEMPLATE_TIME_TO_SECONDS(from->endTime);
+    fx32 t = 0;
+
+    if (endSeconds > startSeconds) {
+        t = ((secondsSinceMidnight - startSeconds) << FX32_SHIFT) / (endSeconds - startSeconds);
+        t = MATH_CLAMP(t, 0, FX32_ONE);
+    }
+
+    AreaLightTemplate blended;
+    blended.endTime = from->endTime;
+    blended.validLightsMask = from->validLightsMask | to->validLightsMask;
+
+    for (int i = 0; i < GX_LIGHTS_COUNT; i++) {
+        int lightMask = 1 << i;
+        BOOL fromValid = (from->validLightsMask & lightMask) != 0;
+        BOOL toValid = (to->validLightsMask & lightMask) != 0;
+
+        // Invalid lights have a black color, so a light turning on or off fades
+        // in or out while keeping the direction of whichever side has one
+        blended.lightColors[i] = BlendColor(from->lightColors[i], to->lightColors[i], t);
+
+        if (fromValid && toValid) {
+            BlendLightVector(&from->lightVectors[i], &to->lightVectors[i], t, &blended.lightVectors[i]);
+        } else {
+            blended.lightVectors[i] = fromValid ? from->lightVectors[i] : to->lightVectors[i];
+        }
+    }
+
+    blended.diffuseReflectColor = BlendColor(from->diffuseReflectColor, to->diffuseReflectColor, t);
+    blended.ambientReflectColor = BlendColor(from->ambientReflectColor, to->ambientReflectColor, t);
+    blended.specularReflectColor = BlendColor(from->specularReflectColor, to->specularReflectColor, t);
+    blended.emissionColor = BlendColor(from->emissionColor, to->emissionColor, t);
+
+    AreaLightTemplate_ApplyToModelAttributes(&blended, areaLightMan->areaModelAttrs);
+    areaLightMan->lastAppliedSeconds = secondsSinceMidnight;
 }
 
 void AreaLight_UseGlobalModelAttributes(NNSG3dResMdl *model)

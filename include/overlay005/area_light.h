@@ -26,6 +26,7 @@ typedef struct AreaLightManager {
     int activeTemplateIndex;
     ModelAttributes *areaModelAttrs;
     BOOL applyToAreaModelAttrs;
+    int lastAppliedSeconds;
 } AreaLightManager;
 
 AreaLightManager *AreaLightManager_New(ModelAttributes *areaModelAttrs, const u8 archiveID);

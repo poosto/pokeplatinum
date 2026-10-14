@@ -10,6 +10,106 @@ index ce31436..97b4603 100644
      u8 masterVolume; /* Master sound volume (0-127) */
      SIM_config_screen_layout_type screenLayout; /* DS screen layout */
      BOOL swapScreens; /* Swap screen positions */
+diff --git a/include/simulator/sim_rtc.h b/include/simulator/sim_rtc.h
+new file mode 100644
+index 0000000..aa8a647
+--- /dev/null
++++ b/include/simulator/sim_rtc.h
+@@ -0,0 +1,20 @@
++#ifndef SIM_RTC_H
++#define SIM_RTC_H
++
++#include <nitro/types.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* When enabled, the RTC reports the host time shifted by offsetSeconds, so the
++   in-game clock keeps ticking but diverges from system time */
++void RTC_SIM_SetTimeOverride(BOOL enabled, s64 offsetSeconds);
++BOOL RTC_SIM_IsTimeOverrideEnabled(void);
++s64 RTC_SIM_GetTimeOverrideOffset(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/libraries/rtc/src/external.c b/libraries/rtc/src/external.c
+index 4282214..d17679b 100644
+--- a/libraries/rtc/src/external.c
++++ b/libraries/rtc/src/external.c
+@@ -10,6 +10,7 @@
+ 
+ #ifdef SDK_PORT
+ #include <time.h>
++#include <simulator/sim_rtc.h>
+ #endif
+ 
+ #if (SDK_VERSION_MAJOR == 4 || (!defined(SDK_TWL)))
+@@ -181,10 +182,38 @@ RTCResult RTC_GetTimeAsync (RTCTime * time, RTCCallback callback, void * arg)
+ }
+ 
+ #ifdef SDK_PORT
++static volatile BOOL sTimeOverrideEnabled = FALSE;
++static volatile s64 sTimeOverrideOffset = 0;
++
++void RTC_SIM_SetTimeOverride(BOOL enabled, s64 offsetSeconds)
++{
++    sTimeOverrideOffset = offsetSeconds;
++    sTimeOverrideEnabled = enabled;
++}
++
++BOOL RTC_SIM_IsTimeOverrideEnabled(void)
++{
++    return sTimeOverrideEnabled;
++}
++
++s64 RTC_SIM_GetTimeOverrideOffset(void)
++{
++    return sTimeOverrideOffset;
++}
++
++static time_t getPCTimeT( void )
++{
++    time_t currentTime = time( NULL );
++    if (sTimeOverrideEnabled) {
++        currentTime += (time_t)sTimeOverrideOffset;
++    }
++    return currentTime;
++}
++
+ static void getPCTime( RTCTime* theTime )
+ {
+     struct tm * timeinfo;
+-    time_t currentTime = time( NULL );
++    time_t currentTime = getPCTimeT();
+     timeinfo = localtime( &currentTime );
+     theTime->hour = timeinfo->tm_hour;
+     theTime->minute = timeinfo->tm_min;
+@@ -194,7 +223,7 @@ static void getPCTime( RTCTime* theTime )
+ static void getPCDate( RTCDate* theDate )
+ {
+     struct tm * timeinfo;
+-    time_t currentTime = time( NULL );
++    time_t currentTime = getPCTimeT();
+     timeinfo = localtime( &currentTime );
+ 
+     theDate->year = timeinfo->tm_year - 100;
+diff --git a/libraries/sim/include/gui_internal.hpp b/libraries/sim/include/gui_internal.hpp
+index 0ffc13b..8ae379a 100644
+--- a/libraries/sim/include/gui_internal.hpp
++++ b/libraries/sim/include/gui_internal.hpp
+@@ -8,6 +8,8 @@ void AppNetInit();
+ void AppNetMain(bool * openState);
+ void AppPadInit();
+ void AppPadMain(bool * openState);
++void AppClockInit();
++void AppClockMain(bool * openState);
+ 
+ }
+ 
 diff --git a/libraries/sim/meson.build b/libraries/sim/meson.build
 index acd4afb..6c38cce 100644
 --- a/libraries/sim/meson.build
@@ -289,6 +389,18 @@ index 1ded67d..31888bb 100644
      s_g3SpecularColor[0] = specularRed << 3;
      s_g3SpecularColor[1] = specularGreen << 3;
      s_g3SpecularColor[2] = specularBlue << 3;
+diff --git a/libraries/sim/src/meson.build b/libraries/sim/src/meson.build
+index 80e30d5..41d68c3 100644
+--- a/libraries/sim/src/meson.build
++++ b/libraries/sim/src/meson.build
+@@ -23,6 +23,7 @@ libsim_srcs = files(
+     'sim_g3_Texture.cpp',
+     'sim_g3_TextureCache.cpp',
+     'sim_gui.cpp',
++    'sim_gui_clock.cpp',
+     'sim_gui_config.cpp',
+     'sim_gui_net.cpp',
+     'sim_gui_pad.cpp',
 diff --git a/libraries/sim/src/shaders/g2_fragment.glsl b/libraries/sim/src/shaders/g2_fragment.glsl
 index b652bd5..367234f 100644
 --- a/libraries/sim/src/shaders/g2_fragment.glsl
@@ -355,10 +467,18 @@ index e994013..39f3d76 100644
  layout (location = 0) in vec3 position;
  layout (location = 1) in vec2 texCoord;
 diff --git a/libraries/sim/src/sim_gui.cpp b/libraries/sim/src/sim_gui.cpp
-index 95b3b71..0eb7b4d 100644
+index 95b3b71..34a88db 100644
 --- a/libraries/sim/src/sim_gui.cpp
 +++ b/libraries/sim/src/sim_gui.cpp
-@@ -49,7 +49,7 @@ void Init(SDL_Window * window, SDL_GLContext context) {
+@@ -20,6 +20,7 @@ static constexpr ImVec2 sButtonSize = {100, 20};
+ static bool sShowAppConfig = false;
+ static bool sShowAppPad = false;
+ static bool sShowAppNet = false;
++static bool sShowAppClock = false;
+ static bool sShowImGuiDemo = false;
+ static bool sShowWindowPrjSpecific = false;
+ 
+@@ -49,7 +50,7 @@ void Init(SDL_Window * window, SDL_GLContext context) {
  
  
  	ImGui_ImplSDL2_InitForOpenGL(sWindow, sContext);
@@ -367,12 +487,83 @@ index 95b3b71..0eb7b4d 100644
    	ImGui_ImplOpenGL3_Init(glsl_version);
  
      ImGui::StyleColorsDark(NULL);
-@@ -157,4 +157,4 @@ void AppButton(const char * label, bool * state, void (*initFunc)(void), void (*
+@@ -74,6 +75,7 @@ void Main() {
+         AppButton("Config", &sShowAppConfig, AppConfigInit, AppConfigMain);
+         AppButton("Input", &sShowAppPad, AppPadInit, AppPadMain);
+         AppButton("Multiplayer", &sShowAppNet, AppNetInit, AppNetMain);
++        AppButton("Clock", &sShowAppClock, AppClockInit, AppClockMain);
+         AppButton("ImGui Demo", &sShowImGuiDemo, nullptr, ImGui::ShowDemoWindow);
+         AppButton("Application", &sShowWindowPrjSpecific, nullptr, PrjMain);
+ 
+@@ -157,4 +159,4 @@ void AppButton(const char * label, bool * state, void (*initFunc)(void), void (*
      }
  }
  
 -}
 \ No newline at end of file
++}
+diff --git a/libraries/sim/src/sim_gui_clock.cpp b/libraries/sim/src/sim_gui_clock.cpp
+new file mode 100644
+index 0000000..fc6e107
+--- /dev/null
++++ b/libraries/sim/src/sim_gui_clock.cpp
+@@ -0,0 +1,57 @@
++#include "simulator/sim_gui.hpp"
++#include "simulator/sim_rtc.h"
++
++#include "simulator/imgui/imgui.hpp"
++
++#include "gui_internal.hpp"
++
++#include <ctime>
++#include <format>
++#include <string>
++
++namespace SIM::GUI {
++
++static constexpr int MinutesPerDay = 24 * 60;
++
++static std::tm LocalTime(s64 offsetSeconds) {
++    std::time_t t = std::time(nullptr) + static_cast<std::time_t>(offsetSeconds);
++    return *std::localtime(&t);
++}
++
++void AppClockInit() {
++}
++
++void AppClockMain(bool * openState) {
++    ImGui::Begin("Clock", openState);
++
++    std::tm systemTime = LocalTime(0);
++    ImGui::Text("System time:  %02d:%02d:%02d", systemTime.tm_hour, systemTime.tm_min, systemTime.tm_sec);
++
++    bool overrideEnabled = RTC_SIM_IsTimeOverrideEnabled();
++    s64 offset = RTC_SIM_GetTimeOverrideOffset();
++
++    if(ImGui::Checkbox("Override in-game time", &overrideEnabled)) {
++        // Start from system time when enabling, and drop the offset when disabling
++        RTC_SIM_SetTimeOverride(overrideEnabled, 0);
++        offset = 0;
++    }
++
++    if(overrideEnabled) {
++        std::tm gameTime = LocalTime(offset);
++        ImGui::Text("In-game time: %02d:%02d:%02d", gameTime.tm_hour, gameTime.tm_min, gameTime.tm_sec);
++
++        int minutes = gameTime.tm_hour * 60 + gameTime.tm_min;
++        std::string label = std::format("{:02}:{:02}", minutes / 60, minutes % 60);
++
++        if(ImGui::SliderInt("Time of day", &minutes, 0, MinutesPerDay - 1, label.c_str())) {
++            // Shift the offset so the in-game clock reads the chosen time on the
++            // same day, then let it keep ticking from there
++            s64 currentSeconds = gameTime.tm_hour * 3600 + gameTime.tm_min * 60 + gameTime.tm_sec;
++            RTC_SIM_SetTimeOverride(TRUE, offset + static_cast<s64>(minutes) * 60 - currentSeconds);
++        }
++    }
++
++    ImGui::End();
++}
++
 +}
 diff --git a/libraries/sim/src/sim_gui_config.cpp b/libraries/sim/src/sim_gui_config.cpp
 index 4cc4aa3..e12e3f7 100644
