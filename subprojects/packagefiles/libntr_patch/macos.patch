@@ -1,3 +1,16 @@
+diff --git a/include/nitro/fx/fx.h b/include/nitro/fx/fx.h
+index dfcc769..2024602 100644
+--- a/include/nitro/fx/fx.h
++++ b/include/nitro/fx/fx.h
+@@ -216,7 +216,7 @@ typedef struct {
+     }
+ 
+     #ifndef FX_Mul
+-        #ifdef SDK_CODE_ARM
++        #if defined(SDK_CODE_ARM) || defined(SDK_PORT)
+             #define FX_Mul(v1, v2) FX_MulInline(v1, v2)
+         #else
+             #define FX_Mul(v1, v2) FX_MulFunc(v1, v2)
 diff --git a/include/nitro/hw/X86/ioreg_G2.h b/include/nitro/hw/X86/ioreg_G2.h
 index c3044ef..35f7d8b 100644
 --- a/include/nitro/hw/X86/ioreg_G2.h
@@ -1425,10 +1438,10 @@ index 0ffc13b..ace95e0 100644
  }
  
 diff --git a/libraries/sim/include/sim_g2.h b/libraries/sim/include/sim_g2.h
-index 400cde3..5733f38 100644
+index 400cde3..08bd0fa 100644
 --- a/libraries/sim/include/sim_g2.h
 +++ b/libraries/sim/include/sim_g2.h
-@@ -1,7 +1,36 @@
+@@ -1,7 +1,38 @@
  #ifndef SIM_G2_H
  #define SIM_G2_H
  #include <nitro/types.h>
@@ -1436,6 +1449,8 @@ index 400cde3..5733f38 100644
  void G2SIM_DrawBG( u8 bgNum, u8 bgMode, u8 bg03D, u8 isSub );
  void G2SIM_DrawOBJ( u32 line, u8 isSub, int bgnum );
 -void G2SIM_PlotPixel(u8 * screenBuf, u8 r, u8 g, u8 b, u32 x, u32 y, BOOL isSub);
++/* Set when G2SIM_DrawOBJ draws any sprite into OBJLine/OBJWindow */
++extern BOOL G2SIM_objLineTouched;
 +
 +// Called per pixel, so it lives here to be inlined
 +// Draws a pixel to the screenBuf. X and Y coordinates are in local DS screen
@@ -2539,7 +2554,7 @@ index ed806e9..fa49c70 100644
 +#endif
 +}
 diff --git a/libraries/sim/src/sim_g2.cpp b/libraries/sim/src/sim_g2.cpp
-index 86cd85e..2f45c97 100644
+index 86cd85e..86267f1 100644
 --- a/libraries/sim/src/sim_g2.cpp
 +++ b/libraries/sim/src/sim_g2.cpp
 @@ -1,5 +1,6 @@
@@ -2549,7 +2564,7 @@ index 86cd85e..2f45c97 100644
  #ifdef SDK_BUILD_NX
  #include <glad/glad.h>
  #else
-@@ -39,8 +40,7 @@ extern u8 s_SIM_DBG_OAMSenable;
+@@ -39,12 +40,12 @@ extern u8 s_SIM_DBG_OAMSenable;
  
  extern u8 s_mosaicTable[16][256];
  
@@ -2559,7 +2574,12 @@ index 86cd85e..2f45c97 100644
  extern GLint s_bgTexUnits[];
  
  extern u32 OBJLine[2][256];
-@@ -241,11 +241,7 @@ void G2SIM_DrawBG(u8 bgNum, u8 bgMode, u8 bg03D, u8 isSub) {
+ extern u8 OBJWindow[2][256];
++BOOL G2SIM_objLineTouched;
+ 
+ static u8 *bgTexTable[] = {bg0tex, bg1tex, bg2tex, bg3tex};
+ static u8 *bgsTexTable[] = {bg0stex, bg1stex, bg2stex, bg3stex};
+@@ -241,11 +242,7 @@ void G2SIM_DrawBG(u8 bgNum, u8 bgMode, u8 bg03D, u8 isSub) {
    }
  
    glActiveTexture(GL_TEXTURE0 + s_bgTexUnits[bgNum]);
@@ -2572,7 +2592,7 @@ index 86cd85e..2f45c97 100644
  #ifdef SDK_TRACY_ENABLE
    TracyCZoneEnd(ctx);
  #endif
-@@ -356,33 +352,6 @@ void G2SIM_DrawOBJ(u32 line, u8 isSub, int bgnum) {
+@@ -356,33 +353,6 @@ void G2SIM_DrawOBJ(u32 line, u8 isSub, int bgnum) {
  #endif
  }
  
@@ -2606,7 +2626,7 @@ index 86cd85e..2f45c97 100644
  
  static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
  #ifdef SDK_TRACY_ENABLE
-@@ -509,6 +478,14 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
+@@ -509,6 +479,14 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
      tilemapaddr += ((yoff & 0xF8) << 3);
    }
  
@@ -2621,7 +2641,7 @@ index 86cd85e..2f45c97 100644
    u16 curtile;
  
    u32 pixelsaddr;
-@@ -583,18 +560,6 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
+@@ -583,18 +561,6 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
  
        // Determine if we are inside/outside the window, and if the current bg
        // should be drawn based on that
@@ -2640,7 +2660,7 @@ index 86cd85e..2f45c97 100644
        u8 windowPass = TRUE;
  
        if (win0Enabled) {
-@@ -664,11 +629,6 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
+@@ -664,11 +630,6 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
          }
        }
  
@@ -2652,7 +2672,7 @@ index 86cd85e..2f45c97 100644
        u32 tilexoff = (curtile & 0x0400) ? (7 - (xpos & 0x7)) : (xpos & 0x7);
        if (tilexoff & 0x1) {
          color = bgvram[(pixelsaddr + (tilexoff >> 1)) & bgvrammask] >> 4;
-@@ -678,18 +638,6 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
+@@ -678,18 +639,6 @@ static void DrawBGLine_Text(u32 line, u32 bgnum, u8 mosaic, u8 isSub) {
  
        // Determine if we are inside/outside the window, and if the current bg
        // should be drawn based on that
@@ -2671,6 +2691,195 @@ index 86cd85e..2f45c97 100644
        u8 windowPass = TRUE;
  
        if (win0Enabled) {
+@@ -1344,6 +1293,7 @@ static void DrawOBJ_RotScale(u32 num, u32 boundwidth, u32 boundheight,
+ 
+   u32 *objLine = OBJLine[isSub];
+   u8 *objWindow = OBJWindow[isSub];
++  G2SIM_objLineTouched = TRUE;
+ 
+   s32 centerX = boundwidth >> 1;
+   s32 centerY = boundheight >> 1;
+@@ -1559,6 +1509,7 @@ static void DrawOBJ_Normal(u32 num, u32 width, u32 height, s32 xpos, s32 ypos,
+ 
+   u32 *objLine = OBJLine[isSub];
+   u8 *objWindow = OBJWindow[isSub];
++  G2SIM_objLineTouched = TRUE;
+ 
+   if (attrib[1] & 0x2000) {
+     ypos = height - 1 - ypos;
+diff --git a/libraries/sim/src/sim_g3_CommandProcessor.cpp b/libraries/sim/src/sim_g3_CommandProcessor.cpp
+index f6741af..22b80fb 100644
+--- a/libraries/sim/src/sim_g3_CommandProcessor.cpp
++++ b/libraries/sim/src/sim_g3_CommandProcessor.cpp
+@@ -96,20 +96,38 @@ static draw_command_type_t DecodeG3Op(u32 op) {
+ }
+ 
+ static void ConvertMsgParams(draw_msg_t *msg) {
+-  draw_msg_t tmpMsg;
+-  memcpy(&tmpMsg, msg, sizeof(draw_msg_t));
++  // The converted fields are written over the same union the parameters are
++  // read from. Vertex commands write 6 bytes and read from byte 8 on, so they
++  // read in place; the rest copy the parameters they use first. Copying the
++  // whole message for every command was a measurable cost.
++  s64 params[17];
++  switch (msg->type) {
++  case DRAW_CMD_G3_BOXTEST:
++  case DRAW_CMD_G3_SCALE:
++  case DRAW_CMD_G3_TRANSLATE:
++  case DRAW_CMD_G3_MTXMULT33:
++  case DRAW_CMD_G3_LOADMTX43:
++  case DRAW_CMD_G3_MTXMULT43:
++  case DRAW_CMD_G3_LOADMTX44:
++  case DRAW_CMD_G3_MTXMULT44:
++    memcpy(params, msg->data.numsS64, sizeof(params));
++    break;
++  default:
++    break;
++  }
++
+   switch (msg->type) {
+   // TODO Commands
+   case DRAW_CMD_G3_VIEWPORT:
+     break;
+ 
+   case DRAW_CMD_G3_BOXTEST:
+-    msg->data.boxtest.x = (s16)tmpMsg.data.numsS64[1];
+-    msg->data.boxtest.y = (s16)tmpMsg.data.numsS64[2];
+-    msg->data.boxtest.z = (s16)tmpMsg.data.numsS64[3];
+-    msg->data.boxtest.width = (s16)tmpMsg.data.numsS64[4];
+-    msg->data.boxtest.height = (s16)tmpMsg.data.numsS64[5];
+-    msg->data.boxtest.depth = (s16)tmpMsg.data.numsS64[6];
++    msg->data.boxtest.x = (s16)params[1];
++    msg->data.boxtest.y = (s16)params[2];
++    msg->data.boxtest.z = (s16)params[3];
++    msg->data.boxtest.width = (s16)params[4];
++    msg->data.boxtest.height = (s16)params[5];
++    msg->data.boxtest.depth = (s16)params[6];
+     break;
+   case DRAW_CMD_G3_PUSHMTX:
+   case DRAW_CMD_G3_END:
+@@ -140,72 +158,72 @@ static void ConvertMsgParams(draw_msg_t *msg) {
+     break;
+   case DRAW_CMD_G3_VTX:
+   case DRAW_CMD_G3_VTX16:
+-    msg->data.xyz.x = (s16)tmpMsg.data.numsS64[1];
+-    msg->data.xyz.y = (s16)tmpMsg.data.numsS64[2];
+-    msg->data.xyz.z = (s16)tmpMsg.data.numsS64[3];
++    msg->data.xyz.x = (s16)msg->data.numsS64[1];
++    msg->data.xyz.y = (s16)msg->data.numsS64[2];
++    msg->data.xyz.z = (s16)msg->data.numsS64[3];
+     break;
+   case DRAW_CMD_G3_VTXXY:
+-    msg->data.xyz.x = (s16)tmpMsg.data.numsS64[1];
+-    msg->data.xyz.y = (s16)tmpMsg.data.numsS64[2];
++    msg->data.xyz.x = (s16)msg->data.numsS64[1];
++    msg->data.xyz.y = (s16)msg->data.numsS64[2];
+     break;
+   case DRAW_CMD_G3_VTXXZ:
+-    msg->data.xyz.x = (s16)tmpMsg.data.numsS64[1];
+-    msg->data.xyz.z = (s16)tmpMsg.data.numsS64[2];
++    msg->data.xyz.x = (s16)msg->data.numsS64[1];
++    msg->data.xyz.z = (s16)msg->data.numsS64[2];
+     break;
+   case DRAW_CMD_G3_VTXYZ:
+-    msg->data.xyz.y = (s16)tmpMsg.data.numsS64[1];
+-    msg->data.xyz.z = (s16)tmpMsg.data.numsS64[2];
++    msg->data.xyz.y = (s16)msg->data.numsS64[1];
++    msg->data.xyz.z = (s16)msg->data.numsS64[2];
+     break;
+   case DRAW_CMD_G3_SCALE:
+   case DRAW_CMD_G3_TRANSLATE:
+-    msg->data.scale[0] = (s32)tmpMsg.data.numsS64[1];
+-    msg->data.scale[1] = (s32)tmpMsg.data.numsS64[2];
+-    msg->data.scale[2] = (s32)tmpMsg.data.numsS64[3];
++    msg->data.scale[0] = (s32)params[1];
++    msg->data.scale[1] = (s32)params[2];
++    msg->data.scale[2] = (s32)params[3];
+     break;
+   case DRAW_CMD_G3_MTXMULT33:
+-    msg->data.mtx33._00 = (s32)tmpMsg.data.numsS64[1];
+-    msg->data.mtx33._01 = (s32)tmpMsg.data.numsS64[2];
+-    msg->data.mtx33._02 = (s32)tmpMsg.data.numsS64[3];
+-    msg->data.mtx33._10 = (s32)tmpMsg.data.numsS64[4];
+-    msg->data.mtx33._11 = (s32)tmpMsg.data.numsS64[5];
+-    msg->data.mtx33._12 = (s32)tmpMsg.data.numsS64[6];
+-    msg->data.mtx33._20 = (s32)tmpMsg.data.numsS64[7];
+-    msg->data.mtx33._21 = (s32)tmpMsg.data.numsS64[8];
+-    msg->data.mtx33._22 = (s32)tmpMsg.data.numsS64[9];
++    msg->data.mtx33._00 = (s32)params[1];
++    msg->data.mtx33._01 = (s32)params[2];
++    msg->data.mtx33._02 = (s32)params[3];
++    msg->data.mtx33._10 = (s32)params[4];
++    msg->data.mtx33._11 = (s32)params[5];
++    msg->data.mtx33._12 = (s32)params[6];
++    msg->data.mtx33._20 = (s32)params[7];
++    msg->data.mtx33._21 = (s32)params[8];
++    msg->data.mtx33._22 = (s32)params[9];
+     break;
+   case DRAW_CMD_G3_LOADMTX43:
+   case DRAW_CMD_G3_MTXMULT43:
+-    msg->data.mtx43._00 = (s32)tmpMsg.data.numsS64[1];
+-    msg->data.mtx43._01 = (s32)tmpMsg.data.numsS64[2];
+-    msg->data.mtx43._02 = (s32)tmpMsg.data.numsS64[3];
+-    msg->data.mtx43._10 = (s32)tmpMsg.data.numsS64[4];
+-    msg->data.mtx43._11 = (s32)tmpMsg.data.numsS64[5];
+-    msg->data.mtx43._12 = (s32)tmpMsg.data.numsS64[6];
+-    msg->data.mtx43._20 = (s32)tmpMsg.data.numsS64[7];
+-    msg->data.mtx43._21 = (s32)tmpMsg.data.numsS64[8];
+-    msg->data.mtx43._22 = (s32)tmpMsg.data.numsS64[9];
+-    msg->data.mtx43._30 = (s32)tmpMsg.data.numsS64[10];
+-    msg->data.mtx43._31 = (s32)tmpMsg.data.numsS64[11];
+-    msg->data.mtx43._32 = (s32)tmpMsg.data.numsS64[12];
++    msg->data.mtx43._00 = (s32)params[1];
++    msg->data.mtx43._01 = (s32)params[2];
++    msg->data.mtx43._02 = (s32)params[3];
++    msg->data.mtx43._10 = (s32)params[4];
++    msg->data.mtx43._11 = (s32)params[5];
++    msg->data.mtx43._12 = (s32)params[6];
++    msg->data.mtx43._20 = (s32)params[7];
++    msg->data.mtx43._21 = (s32)params[8];
++    msg->data.mtx43._22 = (s32)params[9];
++    msg->data.mtx43._30 = (s32)params[10];
++    msg->data.mtx43._31 = (s32)params[11];
++    msg->data.mtx43._32 = (s32)params[12];
+     break;
+   case DRAW_CMD_G3_LOADMTX44:
+   case DRAW_CMD_G3_MTXMULT44:
+-    msg->data.mtx44._00 = (s32)tmpMsg.data.numsS64[1];
+-    msg->data.mtx44._01 = (s32)tmpMsg.data.numsS64[2];
+-    msg->data.mtx44._02 = (s32)tmpMsg.data.numsS64[3];
+-    msg->data.mtx44._03 = (s32)tmpMsg.data.numsS64[4];
+-    msg->data.mtx44._10 = (s32)tmpMsg.data.numsS64[5];
+-    msg->data.mtx44._11 = (s32)tmpMsg.data.numsS64[6];
+-    msg->data.mtx44._12 = (s32)tmpMsg.data.numsS64[7];
+-    msg->data.mtx44._13 = (s32)tmpMsg.data.numsS64[8];
+-    msg->data.mtx44._20 = (s32)tmpMsg.data.numsS64[9];
+-    msg->data.mtx44._21 = (s32)tmpMsg.data.numsS64[10];
+-    msg->data.mtx44._22 = (s32)tmpMsg.data.numsS64[11];
+-    msg->data.mtx44._23 = (s32)tmpMsg.data.numsS64[12];
+-    msg->data.mtx44._30 = (s32)tmpMsg.data.numsS64[13];
+-    msg->data.mtx44._31 = (s32)tmpMsg.data.numsS64[14];
+-    msg->data.mtx44._32 = (s32)tmpMsg.data.numsS64[15];
+-    msg->data.mtx44._33 = (s32)tmpMsg.data.numsS64[16];
++    msg->data.mtx44._00 = (s32)params[1];
++    msg->data.mtx44._01 = (s32)params[2];
++    msg->data.mtx44._02 = (s32)params[3];
++    msg->data.mtx44._03 = (s32)params[4];
++    msg->data.mtx44._10 = (s32)params[5];
++    msg->data.mtx44._11 = (s32)params[6];
++    msg->data.mtx44._12 = (s32)params[7];
++    msg->data.mtx44._13 = (s32)params[8];
++    msg->data.mtx44._20 = (s32)params[9];
++    msg->data.mtx44._21 = (s32)params[10];
++    msg->data.mtx44._22 = (s32)params[11];
++    msg->data.mtx44._23 = (s32)params[12];
++    msg->data.mtx44._30 = (s32)params[13];
++    msg->data.mtx44._31 = (s32)params[14];
++    msg->data.mtx44._32 = (s32)params[15];
++    msg->data.mtx44._33 = (s32)params[16];
+     break;
+   default:
+     break;
 diff --git a/libraries/sim/src/sim_g3_lights.cpp b/libraries/sim/src/sim_g3_lights.cpp
 new file mode 100644
 index 0000000..1be4270
@@ -3032,7 +3241,7 @@ index 0000000..5b9c859
 +
 +}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..1ac4412 100644
+index d968038..33fe9ee 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
 @@ -1,8 +1,11 @@
@@ -3299,7 +3508,31 @@ index d968038..1ac4412 100644
  static void DrawEngine(BOOL isSub) {
    const char *zoneName;
    zoneName = isSub ? "DrawEngine (SUB)" : "DrawEngine (MAIN)";
-@@ -739,8 +777,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -675,11 +713,21 @@ static void DrawEngine(BOOL isSub) {
+     memset(objWindowTex, 0, sizeof(objWindowTex));
+   }
+ 
++  // Most lines have no sprites at a given priority. Then the line buffers are
++  // still clear, so there's nothing to copy out and nothing to clear next time
++  BOOL objLineDirty = TRUE;
+   for (int i = 0; i < SIM_NDS_SCREEN_HEIGHT; i++) {
+     for (int bgnum = 0x0C00; bgnum >= 0x0000; bgnum -= 0x0400) {
+-      memset(OBJLine, 0, sizeof(OBJLine));
+-      memset(OBJWindow, 0, sizeof(OBJWindow));
++      if (objLineDirty) {
++        memset(OBJLine, 0, sizeof(OBJLine));
++        memset(OBJWindow, 0, sizeof(OBJWindow));
++      }
++      G2SIM_objLineTouched = FALSE;
+       G2SIM_DrawOBJ(i, isSub, bgnum);
++      objLineDirty = G2SIM_objLineTouched;
++      if (!objLineDirty) {
++        continue;
++      }
+       u8 *pixelBuf;
+       u8 *objWindowBuf = isSub ? objWindowsTex : objWindowTex;
+       switch (bgnum) {
+@@ -739,8 +787,7 @@ static void DrawEngine(BOOL isSub) {
    // write all OAMs to the textures based on their priorities
    for (int i = 0; i < 4; i++) {
      glActiveTexture(GL_TEXTURE0 + s_objTexUnits[i]);
@@ -3309,7 +3542,7 @@ index d968038..1ac4412 100644
      switch (i) {
      case 0:
        oamPixelBuf = isSub ? oam0sTex : oam0Tex;
-@@ -759,9 +796,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -759,9 +806,7 @@ static void DrawEngine(BOOL isSub) {
        oamPixelBuf = NULL;
        break;
      }
@@ -3320,7 +3553,7 @@ index d968038..1ac4412 100644
    }
  
    glActiveTexture(GL_TEXTURE0 + s_bgTexUnits[0]);
-@@ -770,7 +805,8 @@ static void DrawEngine(BOOL isSub) {
+@@ -770,7 +815,8 @@ static void DrawEngine(BOOL isSub) {
      if (bg0as3d) {
        glBindTexture(GL_TEXTURE_2D, g3RenderTextureId);
      } else {
@@ -3330,7 +3563,7 @@ index d968038..1ac4412 100644
      }
    } else {
      glBindTexture(GL_TEXTURE_2D, dummyScreenTextureId);
-@@ -778,11 +814,8 @@ static void DrawEngine(BOOL isSub) {
+@@ -778,11 +824,8 @@ static void DrawEngine(BOOL isSub) {
  
    // Setup the OBJWindow texture
    glActiveTexture(GL_TEXTURE0 + s_objWindowTexUnit);
@@ -3343,7 +3576,7 @@ index d968038..1ac4412 100644
    glProgramUniform1i(
        g2shaderProgramID,
        glGetUniformLocation(g2shaderProgramID, "objWindowTexture"),
-@@ -818,6 +851,18 @@ static void DrawEngine(BOOL isSub) {
+@@ -818,6 +861,18 @@ static void DrawEngine(BOOL isSub) {
                       glGetUniformLocation(g2shaderProgramID, "bg0as3d"),
                       bg0as3d);
  
@@ -3362,7 +3595,7 @@ index d968038..1ac4412 100644
    // Pass master bright info to the shader
    float masterBrightFactor = isSub
                                   ? (float)(s_reg_GXS_DB_MASTER_BRIGHT & 0b11111)
-@@ -969,7 +1014,6 @@ void *SIM_Render(void *arg) {
+@@ -969,7 +1024,6 @@ void *SIM_Render(void *arg) {
  
      // Unbind 3D Framebuffer
      glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3370,7 +3603,7 @@ index d968038..1ac4412 100644
      glUseProgram(g2shaderProgramID);
  
      glDisable(GL_DEPTH_TEST);
-@@ -982,6 +1026,8 @@ void *SIM_Render(void *arg) {
+@@ -982,6 +1036,8 @@ void *SIM_Render(void *arg) {
      int viewX = 0;
      int viewY = 0;
      float aspectRatio;
@@ -3379,7 +3612,7 @@ index d968038..1ac4412 100644
  
      SDL_GetWindowSize(window, &windowWidth, &windowHeight);
  
-@@ -989,15 +1035,19 @@ void *SIM_Render(void *arg) {
+@@ -989,15 +1045,19 @@ void *SIM_Render(void *arg) {
      switch (s_SIM_config.screenLayout) {
      default:
      case SIM_CONFIG_SCREEN_LAYOUT_VERTICAL:
@@ -3402,7 +3635,7 @@ index d968038..1ac4412 100644
  
      viewWidth = windowWidth;
      viewHeight = (int)((float)windowWidth / aspectRatio);
-@@ -1010,7 +1060,38 @@ void *SIM_Render(void *arg) {
+@@ -1010,7 +1070,38 @@ void *SIM_Render(void *arg) {
        viewY = 0;
      }
  
@@ -3442,7 +3675,7 @@ index d968038..1ac4412 100644
  
      // Set up the bounding box of the touch panel
      if (s_SIM_config.swapScreens) {
-@@ -1074,8 +1155,25 @@ void *SIM_Render(void *arg) {
+@@ -1074,8 +1165,25 @@ void *SIM_Render(void *arg) {
            break;
          }
        }
@@ -3468,7 +3701,7 @@ index d968038..1ac4412 100644
          if (keyRead == s_SIM_config.padSettings.aKey) {
            // A Button
            s_reg_PAD_KEYINPUT = s_reg_PAD_KEYINPUT & 0b1111111111111110;
-@@ -1352,9 +1450,8 @@ void *SIM_Render(void *arg) {
+@@ -1352,9 +1460,8 @@ void *SIM_Render(void *arg) {
      glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
    } while (SIM::GUI::IsGameLogicPaused());
