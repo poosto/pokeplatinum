@@ -2,6 +2,7 @@
 
 #include <nitro.h>
 #include <nnsys.h>
+#include <string.h>
 
 #include "overlay005/land_data.h"
 
@@ -16,6 +17,9 @@
 #define LAMP_COLOR_R     31
 #define LAMP_COLOR_G     25
 #define LAMP_COLOR_B     14
+
+#define WINDOW_COLOR        GX_RGB(31, 24, 12)
+#define WINDOW_MAX_STRENGTH FX32_CONST(0.85)
 
 // When lamps fade in and out, in seconds since midnight
 #define LAMPS_ON_START  (17 * SECONDS_PER_HOUR + 30 * 60)
@@ -36,6 +40,7 @@ static SIM_G3PointLight sLights[SIM_G3_MAX_POINT_LIGHTS];
 #endif
 static int sLightCount;
 static GXRgb sLampColor;
+static BOOL sWindowsGlowing;
 
 // How strongly lamps are lit at the current time, from 0 to FX32_ONE
 static fx32 FieldPointLights_CalcBrightness(void)
@@ -81,10 +86,36 @@ void FieldPointLights_AddMapLamps(int landDataID, const VecFx32 *mapPosition)
 #endif
 }
 
+// Building window materials are named like h_mado (mado is window) or window01
+static BOOL IsWindowMaterial(const NNSG3dResName *name)
+{
+    char str[NNS_G3D_RESNAME_SIZE + 1];
+    memcpy(str, name->name, NNS_G3D_RESNAME_SIZE);
+    str[NNS_G3D_RESNAME_SIZE] = '\0';
+
+    return strstr(str, "mado") != NULL || strncmp(str, "win", 3) == 0;
+}
+
+void FieldPointLights_ApplyWindowGlow(NNSG3dResMdl *model)
+{
+#ifdef SDK_PORT
+    const NNSG3dResMat *materials = NNS_G3dGetMat(model);
+
+    for (u32 i = 0; i < materials->dict.numEntry; i++) {
+        if (IsWindowMaterial(NNS_G3dGetMatNameByIdx(materials, i))) {
+            NNS_G3dMdlSetMdlPolygonID(model, i, sWindowsGlowing ? SIM_G3_GLOW_POLYGON_ID : 0);
+        }
+    }
+#endif
+}
+
 void FieldPointLights_Update(const LandDataManager *landDataMan, BOOL isOutdoors)
 {
 #ifdef SDK_PORT
     fx32 brightness = isOutdoors ? FieldPointLights_CalcBrightness() : 0;
+
+    sWindowsGlowing = brightness != 0;
+    SIM_G3_SetGlow(WINDOW_COLOR, FX_Mul(brightness, WINDOW_MAX_STRENGTH));
 
     sLightCount = 0;
     sLampColor = GX_RGB(ScaleChannel(LAMP_COLOR_R, brightness), ScaleChannel(LAMP_COLOR_G, brightness), ScaleChannel(LAMP_COLOR_B, brightness));

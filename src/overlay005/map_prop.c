@@ -6,6 +6,7 @@
 #include "constants/heap.h"
 
 #include "overlay005/area_data.h"
+#include "overlay005/field_point_lights.h"
 #include "overlay005/map_prop_animation.h"
 #include "overlay005/map_prop_material_shape.h"
 #include "overlay005/model_attributes.h"
@@ -156,6 +157,7 @@ void MapPropManager_Render(const VecFx32 *positionOffset, const AreaDataManager 
                         modelAttrs,
                         loadedProp->model,
                         MODEL_LIGHT_VECTOR_1 | MODEL_LIGHT_VECTOR_2 | MODEL_LIGHT_COLOR_1 | MODEL_LIGHT_COLOR_2 | MODEL_DIFFUSE_REFLECT_COLOR | MODEL_AMBIENT_REFLECT_COLOR | MODEL_SPECULAR_REFLECT_COLOR | MODEL_EMISSION_COLOR);
+                    FieldPointLights_ApplyWindowGlow(loadedProp->model);
                 }
 
                 MapProp_GetMaterialShapeIDsCount(loadedProp->modelID, propMatShp, &propMatShpIDsCount);

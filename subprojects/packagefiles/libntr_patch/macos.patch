@@ -73,10 +73,10 @@ index b96f3e0..1e7c9f6 100644
  }
 diff --git a/include/simulator/sim_g3_lights.h b/include/simulator/sim_g3_lights.h
 new file mode 100644
-index 0000000..187e6a6
+index 0000000..a2173d2
 --- /dev/null
 +++ b/include/simulator/sim_g3_lights.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,57 @@
 +#ifndef SIM_G3_LIGHTS_H
 +#define SIM_G3_LIGHTS_H
 +
@@ -102,6 +102,18 @@ index 0000000..187e6a6
 +   buffers are swapped, so scenes that stop setting them (battles, menus) don't
 +   inherit stale lights. */
 +void SIM_G3_SetPointLights(const SIM_G3PointLight * lights, int count);
++
++/* Polygons drawn with this polygon ID glow with the frame's glow color, for
++   things like lit windows at night */
++#define SIM_G3_GLOW_POLYGON_ID 63
++
++/* Sets the glow color and strength for the current frame. Like the point
++   lights it's cleared when the buffers are swapped. Strength is 0 to FX32_ONE */
++void SIM_G3_SetGlow(GXRgb color, fx32 strength);
++
++/* Sets the glow uniforms for a batch drawn with the given polygon ID */
++void G3SIM_ApplyGlow(u8 polygonId);
++void G3SIM_ClearFrameGlow(void);
 +
 +/* Number of falloff steps, for a banded pixel art look. 0 for smooth falloff */
 +void SIM_G3_SetPointLightBands(int bands);
@@ -270,7 +282,7 @@ index 9613af9..247ad41 100644
  
      const char * screenLayoutString = ScreenLayoutTypeToString(aConfig->screenLayout);
 diff --git a/libraries/sim/src/g3_draw.cpp b/libraries/sim/src/g3_draw.cpp
-index 2cb19b4..259c926 100644
+index 2cb19b4..ffa264c 100644
 --- a/libraries/sim/src/g3_draw.cpp
 +++ b/libraries/sim/src/g3_draw.cpp
 @@ -11,7 +11,9 @@
@@ -364,16 +376,17 @@ index 2cb19b4..259c926 100644
  
  	glBindVertexArray(0);
  	glDisableVertexAttribArray(0);
-@@ -178,6 +205,8 @@ void G3SIM_FlushArray()
+@@ -178,6 +205,9 @@ void G3SIM_FlushArray()
  	TracyCZone(FlushArrayZone, 1);
  	#endif
  
 +	G3SIM_UploadPointLights();
++	G3SIM_ApplyGlow(s_curPolygonAttr.polygonId);
 +
  	u8 * texBuf = nullptr;
  	std::shared_ptr<SIM::G3::Texture> texture = nullptr;
  
-@@ -189,7 +218,7 @@ void G3SIM_FlushArray()
+@@ -189,7 +219,7 @@ void G3SIM_FlushArray()
  		u16 * colorAddr = (u16*)vramPltt;
  
  		//Calculate the texture + palette CRC
@@ -382,7 +395,7 @@ index 2cb19b4..259c926 100644
  		u32 vramTexBufSize = 0;
  
  		if(s_texImageParam.textureFormat == GX_TEXFMT_PLTT4) {
-@@ -200,7 +229,7 @@ void G3SIM_FlushArray()
+@@ -200,7 +230,7 @@ void G3SIM_FlushArray()
  			vramTexBufSize = (s_texImageParam.textureSSize * s_texImageParam.textureTSize);
  		}
  
@@ -391,9 +404,11 @@ index 2cb19b4..259c926 100644
  		texture = sTextureCache.GetTexture(textureCRC, paletteCRC);
  		if(texture == nullptr) {
  			// decode texture and create it in the cache
-@@ -404,12 +433,12 @@ void G3SIM_DrawItems()
+@@ -403,13 +433,14 @@ void G3SIM_DrawItems()
+ 		// Set the polygon mode in the shader
  		GLint polygonModeLoc = glGetUniformLocation(g3shaderProgramID, "polygonMode");
  		glProgramUniform1i(g3shaderProgramID, polygonModeLoc, item->polygonAttr.polygonMode);
++		G3SIM_ApplyGlow(item->polygonAttr.polygonId);
  
 -		glBindVertexArray(s_G3DrawVertexArray);
 -		glBindBuffer(GL_ARRAY_BUFFER, s_G3DrawVertexBuffer);
@@ -410,7 +425,7 @@ index 2cb19b4..259c926 100644
  }
 \ No newline at end of file
 diff --git a/libraries/sim/src/g3_handler.cpp b/libraries/sim/src/g3_handler.cpp
-index 1ded67d..e19aad4 100644
+index 1ded67d..61d91df 100644
 --- a/libraries/sim/src/g3_handler.cpp
 +++ b/libraries/sim/src/g3_handler.cpp
 @@ -20,6 +20,7 @@
@@ -638,7 +653,26 @@ index 1ded67d..e19aad4 100644
  
              //Diffuse color
              color[0] = color[0] + (((float)s_g3DiffuseColor[0] / 255.0f) * ((float)s_G3LightColor[lightNum][0] / 255.0f) * diffuseLevel); // * DiffuseLevel TODO
-@@ -1483,16 +1475,13 @@ void G3SIM_SpecEmi(u32 data)
+@@ -1427,8 +1419,9 @@ void G3SIM_PolygonAttr(u32 data)
+     u8 cullMode = (data & 0b11000000) >> 6;
+     u8 depthTest = (data & 0b100000000000000) >> 14;
+     u8 useFog = (data & 0b1000000000000000) >> 15;
++    u8 polygonId = (data >> 24) & 0x3F;
+ 
+-    if(cullMode != s_curPolygonAttr.cullMode || polygonMode != s_curPolygonAttr.polygonMode || alpha != s_curPolygonAttr.alphaInt || depthTest != s_curPolygonAttr.depthTest || useFog != s_curPolygonAttr.fogEnable)
++    if(cullMode != s_curPolygonAttr.cullMode || polygonMode != s_curPolygonAttr.polygonMode || alpha != s_curPolygonAttr.alphaInt || depthTest != s_curPolygonAttr.depthTest || useFog != s_curPolygonAttr.fogEnable || polygonId != s_curPolygonAttr.polygonId)
+     {
+         // Flush the vertex buffer
+         G3SIM_FlushArray();
+@@ -1449,6 +1442,7 @@ void G3SIM_PolygonAttr(u32 data)
+     s_curPolygonAttr.alphaInt = alpha;
+     s_curPolygonAttr.depthTest = depthTest;
+     s_curPolygonAttr.fogEnable = useFog;
++    s_curPolygonAttr.polygonId = polygonId;
+ 
+     if(alpha == 31){
+         s_curPolygonAttr.alpha = 1.0f;
+@@ -1483,16 +1477,13 @@ void G3SIM_SpecEmi(u32 data)
      u8 specularRed = (data & 0b11111);
      u8 specularGreen = (data & 0b1111100000) >> 5;
      u8 specularBlue = (data & 0b111110000000000) >> 10;
@@ -658,15 +692,16 @@ index 1ded67d..e19aad4 100644
      s_g3SpecularColor[0] = specularRed << 3;
      s_g3SpecularColor[1] = specularGreen << 3;
      s_g3SpecularColor[2] = specularBlue << 3;
-@@ -1507,6 +1496,7 @@ void G3SIM_SwapBuffers(u8 depthBufferMode)
+@@ -1507,6 +1498,8 @@ void G3SIM_SwapBuffers(u8 depthBufferMode)
  {
      s_SIM_useWBuffer = depthBufferMode;
      s_swapBuffersCalledThisFrame = TRUE;
 +    G3SIM_ClearFramePointLights();
++    G3SIM_ClearFrameGlow();
  }
  
  u8 G3SIM_SwapBuffersCalledThisFrame()
-@@ -1597,6 +1587,23 @@ void G3SIM_Vtx(s16 x, s16 y, s16 z)
+@@ -1597,6 +1590,23 @@ void G3SIM_Vtx(s16 x, s16 y, s16 z)
      fxZ = z;
      fxW = FX32_ONE;
  
@@ -690,7 +725,7 @@ index 1ded67d..e19aad4 100644
      calculateVtxFx(&fxX, &fxY, &fxZ, &fxW);
  
      s_g3PolygonVerts[s_G3numInPoly].x = fxX;
-@@ -1687,6 +1694,13 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+@@ -1687,6 +1697,13 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
          glVerts[i].g = curVtx->g;
          glVerts[i].b = curVtx->b;
          glVerts[i].a = curVtx->a;
@@ -704,7 +739,7 @@ index 1ded67d..e19aad4 100644
      }
  
      // Get the W size and remove the polygon if W is 0
-@@ -1776,3 +1790,8 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+@@ -1776,3 +1793,8 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
  
  
  }
@@ -768,7 +803,7 @@ index fc7a724..f91cee2 100644
 \ No newline at end of file
 +)""
 diff --git a/libraries/sim/src/shaders/g3_fragment.glsl b/libraries/sim/src/shaders/g3_fragment.glsl
-index ffd028a..64b1b36 100644
+index ffd028a..ce5982d 100644
 --- a/libraries/sim/src/shaders/g3_fragment.glsl
 +++ b/libraries/sim/src/shaders/g3_fragment.glsl
 @@ -1,5 +1,5 @@
@@ -778,7 +813,7 @@ index ffd028a..64b1b36 100644
  
  uniform sampler2D myTexture;
  uniform int useTexture;
-@@ -11,17 +11,63 @@ uniform float fogDensity[32];
+@@ -11,17 +11,65 @@ uniform float fogDensity[32];
  smooth in vec2 fragTexCoord;
  smooth in vec4 fragInColor;
  smooth in vec4 coords;
@@ -792,6 +827,8 @@ index ffd028a..64b1b36 100644
 +uniform vec3 pointLightColor[MAX_POINT_LIGHTS];
 +uniform int pointLightBands;
 +uniform int pointLightDebug;
++// rgb is the glow color, a how strongly this batch glows (0 for most batches)
++uniform vec4 glowColor;
 +
 +vec3 pointLighting()
 +{
@@ -846,7 +883,7 @@ index ffd028a..64b1b36 100644
          } else {
              shadedColor = texture(myTexture, fragTexCoord);
          }
-@@ -29,7 +75,7 @@ void main()
+@@ -29,9 +77,16 @@ void main()
              discard;
          }
      } else {
@@ -854,8 +891,17 @@ index ffd028a..64b1b36 100644
 +        shadedColor = vertexColor;
      }
      
++    if(glowColor.a > 0.0) {
++        // Glowing polygons (lit windows) take on the glow color, keeping the
++        // texture's light and dark detail so frames and panes still read
++        float detail = useTexture == 1 ? dot(texture(myTexture, fragTexCoord).rgb, vec3(0.299, 0.587, 0.114)) : 1.0;
++        shadedColor.rgb = mix(shadedColor.rgb, glowColor.rgb * (0.55 + 0.45 * detail), glowColor.a);
++    }
++
      if(useFog == 1) {
-@@ -60,4 +106,4 @@ void main()
+         float fog_maxdist = 1.0;
+         float fog_mindist = 0.5;
+@@ -60,4 +115,4 @@ void main()
       color = shadedColor;
      }
  }
@@ -969,10 +1015,10 @@ index 86cd85e..7b71aab 100644
                    SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
 diff --git a/libraries/sim/src/sim_g3_lights.cpp b/libraries/sim/src/sim_g3_lights.cpp
 new file mode 100644
-index 0000000..f296058
+index 0000000..726f084
 --- /dev/null
 +++ b/libraries/sim/src/sim_g3_lights.cpp
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,147 @@
 +#include <simulator/sim_g3_lights.h>
 +
 +#ifdef SDK_BUILD_NX
@@ -993,6 +1039,7 @@ index 0000000..f296058
 +static int sBands = 8;
 +static BOOL sDirty = TRUE;
 +static BOOL sDebugView = FALSE;
++static float sGlowColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 +
 +void SIM_G3_SetPointLights(const SIM_G3PointLight * lights, int count) {
 +    if (count > SIM_G3_MAX_POINT_LIGHTS) {
@@ -1099,6 +1146,25 @@ index 0000000..f296058
 +
 +BOOL SIM_G3_GetPointLightDebugView(void) {
 +    return sDebugView;
++}
++
++void SIM_G3_SetGlow(GXRgb color, fx32 strength) {
++    sGlowColor[0] = (float)(color & 0x1F) / 31.0f;
++    sGlowColor[1] = (float)((color >> 5) & 0x1F) / 31.0f;
++    sGlowColor[2] = (float)((color >> 10) & 0x1F) / 31.0f;
++    sGlowColor[3] = FX_FX32_TO_F32(strength);
++}
++
++void G3SIM_ClearFrameGlow(void) {
++    sGlowColor[3] = 0.0f;
++}
++
++void G3SIM_ApplyGlow(u8 polygonId) {
++    BOOL glow = polygonId == SIM_G3_GLOW_POLYGON_ID && sGlowColor[3] > 0.0f;
++    // Called for every batch, so the location is looked up once
++    static GLint glowColorLoc = glGetUniformLocation(g3shaderProgramID, "glowColor");
++    glProgramUniform4f(g3shaderProgramID, glowColorLoc,
++        sGlowColor[0], sGlowColor[1], sGlowColor[2], glow ? sGlowColor[3] : 0.0f);
 +}
 diff --git a/libraries/sim/src/sim_gui.cpp b/libraries/sim/src/sim_gui.cpp
 index 95b3b71..fe4bf4e 100644
