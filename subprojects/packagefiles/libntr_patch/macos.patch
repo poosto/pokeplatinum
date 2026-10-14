@@ -989,10 +989,14 @@ index cc53ffd..5d8df61 100644
  
  
 diff --git a/include/simulator/config/sim_config.h b/include/simulator/config/sim_config.h
-index ce31436..97b4603 100644
+index ce31436..a611618 100644
 --- a/include/simulator/config/sim_config.h
 +++ b/include/simulator/config/sim_config.h
-@@ -56,6 +56,7 @@ typedef struct {
+@@ -53,9 +53,11 @@ typedef struct {
+ 
+ typedef struct {
+     u32 internalResolutionScale; /* 3D rendering internal resolution scale factor */
++    u8 autoInternalResolution; /* TRUE to pick the internal resolution from the window size */
      u32 windowWidth; /* Initial width of the window. If set to 0, will use the default width for the screen layout */
      u32 windowHeight; /* Initial height of the window. If set to 0, will use default height for the screen layout */
      u8 fullScreen; /* TRUE to enable fullscreen */
@@ -1498,10 +1502,20 @@ index acd4afb..6c38cce 100644
  if(build_target == 'linux' or build_target == 'win64')
  sdl2_lib = meson.get_compiler('c').find_library('SDL2')
 diff --git a/libraries/sim/src/config/sim_config.c b/libraries/sim/src/config/sim_config.c
-index 9613af9..247ad41 100644
+index 9613af9..e1cfc96 100644
 --- a/libraries/sim/src/config/sim_config.c
 +++ b/libraries/sim/src/config/sim_config.c
-@@ -41,6 +41,9 @@ static int IniHandler(void* user, const char* section, const char* name,
+@@ -32,6 +32,9 @@ static int IniHandler(void* user, const char* section, const char* name,
+     if(MATCH("General", "InternalResolutionScale")) {
+         config->internalResolutionScale = atoi(value);
+     }
++    if(MATCH("General", "AutoInternalResolution")) {
++        config->autoInternalResolution = StringToBool(value);
++    }
+     if(MATCH("General", "WindowHeight")) {
+         config->windowHeight = atoi(value);
+     }
+@@ -41,6 +44,9 @@ static int IniHandler(void* user, const char* section, const char* name,
      if(MATCH("General", "FullScreen")) {
          config->fullScreen = StringToBool(value);
      }
@@ -1511,15 +1525,21 @@ index 9613af9..247ad41 100644
      if(MATCH("General", "MasterVolume")) {
          config->masterVolume = atoi(value);
          if(config->masterVolume > 127) {
-@@ -348,6 +351,7 @@ void SIM_Config_LoadDefaults(SIM_config_type * aConfig)
+@@ -347,7 +353,9 @@ void SIM_Config_LoadDefaults(SIM_config_type * aConfig)
+     aConfig->windowHeight = 0;
      aConfig->windowWidth = 0;
  #endif
++    aConfig->autoInternalResolution = TRUE;
      aConfig->fullScreen = FALSE;
 +    aConfig->integerScaling = FALSE;
      aConfig->screenLayout = SIM_CONFIG_SCREEN_LAYOUT_VERTICAL;
      aConfig->swapScreens = FALSE;
      aConfig->vsyncInterval = 1;
-@@ -426,6 +430,7 @@ void SIM_Config_SaveConfigFile(SIM_config_type * aConfig)
+@@ -423,9 +431,11 @@ void SIM_Config_SaveConfigFile(SIM_config_type * aConfig)
+     
+     fprintf(configFile, "[General]\n");
+     fprintf(configFile, "InternalResolutionScale=%d\n", aConfig->internalResolutionScale);
++    fprintf(configFile, "AutoInternalResolution=%s\n", BoolToString(aConfig->autoInternalResolution));
      fprintf(configFile, "WindowHeight=%d\n", aConfig->windowHeight);
      fprintf(configFile, "WindowWidth=%d\n", aConfig->windowWidth);
      fprintf(configFile, "FullScreen=%s\n", BoolToString(aConfig->fullScreen));
@@ -2162,7 +2182,7 @@ index 80e30d5..5e61efb 100644
      'sim_screenquads.c',
      'sim_shaders.cpp',
 diff --git a/libraries/sim/src/shaders/g2_fragment.glsl b/libraries/sim/src/shaders/g2_fragment.glsl
-index b652bd5..86b73ed 100644
+index b652bd5..022a2bc 100644
 --- a/libraries/sim/src/shaders/g2_fragment.glsl
 +++ b/libraries/sim/src/shaders/g2_fragment.glsl
 @@ -1,5 +1,5 @@
@@ -2172,7 +2192,7 @@ index b652bd5..86b73ed 100644
  
  uniform sampler2D myTexture;
  uniform sampler2D bgTexture[4];
-@@ -16,13 +16,67 @@ uniform int dispcnt;
+@@ -16,13 +16,72 @@ uniform int dispcnt;
  uniform int winout;
  uniform int bg0as3d;
  
@@ -2188,7 +2208,8 @@ index b652bd5..86b73ed 100644
  uniform int inMasterBrightMode;
  out vec4 color;
 +
-+const vec2 dsTexSize = vec2(256.0, 384.0); // Both screens stacked
++// The 3D layer is a single screen, the 2D layers are both screens stacked
++const vec2 ds3DSize = vec2(256.0, 192.0);
 +const vec2 blurTaps[12] = vec2[12](
 +    vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457),
 +    vec2(-0.203, 0.621), vec2(0.962, -0.195), vec2(0.473, -0.480),
@@ -2198,33 +2219,37 @@ index b652bd5..86b73ed 100644
 +
 +vec4 bg0Color;
 +
-+// The 3D layer, blurred away from the focus band. Blurred areas are sampled at
-+// DS pixel centers so they stay blocky like the rest of the screen
++// The 3D layer, blurred away from the tilt-shift focus band. Blurred areas are
++// sampled at DS pixel centers so they stay blocky like the rest of the screen
 +vec4 Sample3DLayer()
 +{
-+    vec4 sharp = texture(bgTexture[0], fragTexCoord);
-+    if (tiltShiftBlur <= 0.0 || bg0as3d == 0) {
++    if (bg0as3d == 0) {
++        return texture(bgTexture[0], fragTexCoord);
++    }
++
++    // The 3D framebuffer holds only the screen the 3D engine draws to, so map
++    // this screen's half of the stacked layout onto it
++    vec2 uv = vec2(fragTexCoord.s, fract(fragTexCoord.t * 2.0));
++    vec4 sharp = texture(bgTexture[0], uv);
++    if (tiltShiftBlur <= 0.0) {
 +        return sharp;
 +    }
 +
-+    // Each screen is half of the texture
-+    float screenStart = fragTexCoord.t >= 0.5 ? 0.5 : 0.0;
-+    float screenY = (fragTexCoord.t - screenStart) * 2.0;
-+    float amount = smoothstep(tiltShiftFocusSize, tiltShiftFocusSize + 0.3, abs(screenY - tiltShiftFocusY));
++    float amount = smoothstep(tiltShiftFocusSize, tiltShiftFocusSize + 0.3, abs(uv.t - tiltShiftFocusY));
 +    if (amount <= 0.0) {
 +        return sharp;
 +    }
 +
-+    vec2 dsPixel = (floor(fragTexCoord * dsTexSize) + 0.5) / dsTexSize;
++    vec2 dsPixel = (floor(uv * ds3DSize) + 0.5) / ds3DSize;
 +    float radius = amount * tiltShiftBlur;
-+    float minT = screenStart + 0.5 / dsTexSize.y;
-+    float maxT = screenStart + 0.5 - 0.5 / dsTexSize.y;
++    float minT = 0.5 / ds3DSize.y;
++    float maxT = 1.0 - minT;
 +
 +    vec4 sum = texture(bgTexture[0], dsPixel);
 +    for (int i = 0; i < 12; i++) {
-+        vec2 uv = dsPixel + blurTaps[i] * radius / dsTexSize;
-+        uv.t = clamp(uv.t, minT, maxT); // Don't bleed into the other screen
-+        sum += texture(bgTexture[0], uv);
++        vec2 tapUv = dsPixel + blurTaps[i] * radius / ds3DSize;
++        tapUv.t = clamp(tapUv.t, minT, maxT);
++        sum += texture(bgTexture[0], tapUv);
 +    }
 +    return mix(sharp, sum / 13.0, smoothstep(0.0, 0.25, amount));
 +}
@@ -2240,7 +2265,7 @@ index b652bd5..86b73ed 100644
      int oamsDrawn = 0;
      int currentBgDrawn = 5; // Backdrop
      bool objWindowEnabled = ((dispcnt >> 15) & 1) == 1;
-@@ -61,59 +115,59 @@ void main()
+@@ -61,59 +120,59 @@ void main()
              }
          }
          // Draw the current bg
@@ -2322,7 +2347,7 @@ index b652bd5..86b73ed 100644
                  color.a = 1.0;
                  currentBgDrawn = bgNum;
              }
-@@ -142,4 +196,4 @@ void main()
+@@ -142,4 +201,4 @@ void main()
          color.b = color.b - (color.b * (inMasterBrightFactor / 16.0));
      }
  }
@@ -3162,10 +3187,10 @@ index 0000000..fc6e107
 +
 +}
 diff --git a/libraries/sim/src/sim_gui_config.cpp b/libraries/sim/src/sim_gui_config.cpp
-index 4cc4aa3..e12e3f7 100644
+index 4cc4aa3..c1e85fb 100644
 --- a/libraries/sim/src/sim_gui_config.cpp
 +++ b/libraries/sim/src/sim_gui_config.cpp
-@@ -42,7 +42,8 @@ void AppConfigMain(bool *openState) {
+@@ -42,18 +42,29 @@ void AppConfigMain(bool *openState) {
      int vSyncInterval = sConfig->vsyncInterval;
      bool frameLimit = sConfig->capFrameRate;
      bool fullScreen = sConfig->fullScreen;
@@ -3175,7 +3200,18 @@ index 4cc4aa3..e12e3f7 100644
      ImGui::Begin("Config", openState);
  
      ImGui::Text("Internal Resolution");
-@@ -54,6 +55,9 @@ void AppConfigMain(bool *openState) {
++    bool autoInternalRes = sConfig->autoInternalResolution;
++    if(ImGui::Checkbox("Match window", &autoInternalRes)) {
++        sConfig->autoInternalResolution = autoInternalRes;
++        configChanged = true;
++    }
++    ImGui::BeginDisabled(autoInternalRes);
+     if(ImGui::SliderScalar(" ", ImGuiDataType_U8, &sConfig->internalResolutionScale, &MinInternalRes, &MaxInternalRes, "%dx NDS")) {
+         configChanged = true;
+         SIM_SetInternalResolutionAfterRender(sConfig->internalResolutionScale);
+     }
++    ImGui::EndDisabled();
+ 
      if(ImGui::Checkbox("Fullscreen", &fullScreen)) {
          configChanged = true;
      }
@@ -3185,7 +3221,7 @@ index 4cc4aa3..e12e3f7 100644
  
      if(ImGui::Combo("Layout", &screenLayout, ScreenLayoutStrings, 3, 3)) {
          configChanged = true;
-@@ -79,6 +83,7 @@ void AppConfigMain(bool *openState) {
+@@ -79,6 +90,7 @@ void AppConfigMain(bool *openState) {
          sConfig->screenLayout = static_cast<SIM_config_screen_layout_type>(screenLayout);
          sConfig->swapScreens = swapScreens;
          sConfig->fullScreen = fullScreen;
@@ -3241,7 +3277,7 @@ index 0000000..5b9c859
 +
 +}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..33fe9ee 100644
+index d968038..3db8b8b 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
 @@ -1,8 +1,11 @@
@@ -3316,8 +3352,18 @@ index d968038..33fe9ee 100644
  void *runVblankInterrupt(void *arg) {
    OS_IRQTable[OS_IE_V_BLANK - 1]();
    return NULL;
-@@ -293,11 +296,11 @@ void SIM_SetInternalResolution(int internalRes) {
-                SIM_NDS_SCREEN_HEIGHT * 2 * s_SIM_config.internalResolutionScale,
+@@ -286,18 +289,20 @@ void GLAPIENTRY MessageCallback(GLenum source, GLenum type, GLuint id,
+   //           type, severity, message );
+ }
+ 
++// The 3D framebuffer is one screen tall: the 3D engine only draws to one
++// screen, and the compositor maps that screen's half onto it
+ void SIM_SetInternalResolution(int internalRes) {
+   glBindTexture(GL_TEXTURE_2D, g3RenderTextureId);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                SIM_NDS_SCREEN_WIDTH * s_SIM_config.internalResolutionScale,
+-               SIM_NDS_SCREEN_HEIGHT * 2 * s_SIM_config.internalResolutionScale,
++               SIM_NDS_SCREEN_HEIGHT * s_SIM_config.internalResolutionScale,
                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
  
 -  glBindRenderbuffer(GL_RENDERBUFFER, g3RenderBufferId);
@@ -3328,12 +3374,12 @@ index d968038..33fe9ee 100644
 +  glBindTexture(GL_TEXTURE_2D, g3DepthTextureId);
 +  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8,
 +               SIM_NDS_SCREEN_WIDTH * s_SIM_config.internalResolutionScale,
-+               SIM_NDS_SCREEN_HEIGHT * 2 * s_SIM_config.internalResolutionScale,
++               SIM_NDS_SCREEN_HEIGHT * s_SIM_config.internalResolutionScale,
 +               0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
  }
  
  static bool sChangeInternalResAfterRender = false;
-@@ -314,8 +317,14 @@ void *SIM_RenderInit(void *arg) {
+@@ -314,8 +319,14 @@ void *SIM_RenderInit(void *arg) {
             SDL_INIT_JOYSTICK);
    SIM_Audio_Init(44100);
  
@@ -3348,7 +3394,7 @@ index d968038..33fe9ee 100644
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-@@ -378,7 +387,8 @@ void *SIM_RenderInit(void *arg) {
+@@ -378,7 +389,8 @@ void *SIM_RenderInit(void *arg) {
  
    window = SDL_CreateWindow(
        windowTitle.c_str(), 100, 100, windowWidth, windowHeight,
@@ -3358,7 +3404,7 @@ index d968038..33fe9ee 100644
    context = SDL_GL_CreateContext(window);
  
    if(s_SIM_config.fullScreen) {
-@@ -392,8 +402,10 @@ void *SIM_RenderInit(void *arg) {
+@@ -392,8 +404,10 @@ void *SIM_RenderInit(void *arg) {
    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
    glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
@@ -3371,7 +3417,7 @@ index d968038..33fe9ee 100644
  
    GLenum glErrCode;
    GLint status;
-@@ -401,38 +413,15 @@ void *SIM_RenderInit(void *arg) {
+@@ -401,38 +415,15 @@ void *SIM_RenderInit(void *arg) {
  
    GLchar *errorBuf;
  
@@ -3416,7 +3462,7 @@ index d968038..33fe9ee 100644
  #define GenerateTexture(_id, _width, _height)                                  \
    glGenTextures(1, &_id);                                                      \
    glActiveTexture(GL_TEXTURE0);                                                \
-@@ -483,8 +472,11 @@ void *SIM_RenderInit(void *arg) {
+@@ -483,8 +474,11 @@ void *SIM_RenderInit(void *arg) {
  
    GenerateTexture(dummyScreenTextureId, SIM_NDS_SCREEN_WIDTH,
                    SIM_NDS_SCREEN_HEIGHT * 2);
@@ -3430,7 +3476,7 @@ index d968038..33fe9ee 100644
  
    // 3D Framebuffer render texture
    glGenFramebuffers(1, &g3FrameBuffer);
-@@ -498,11 +490,16 @@ void *SIM_RenderInit(void *arg) {
+@@ -498,11 +492,16 @@ void *SIM_RenderInit(void *arg) {
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                           g3RenderTextureId, 0);
@@ -3451,7 +3497,7 @@ index d968038..33fe9ee 100644
  
    // Check FBO status
    int fboStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-@@ -512,7 +509,6 @@ void *SIM_RenderInit(void *arg) {
+@@ -512,7 +511,6 @@ void *SIM_RenderInit(void *arg) {
  
    // Unbind all that stuff
    glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3459,7 +3505,7 @@ index d968038..33fe9ee 100644
  
    glBindTexture(GL_TEXTURE_2D, g2TextureId);
  
-@@ -557,6 +553,48 @@ void *SIM_RenderInit(void *arg) {
+@@ -557,6 +555,48 @@ void *SIM_RenderInit(void *arg) {
    return nullptr;
  }
  
@@ -3508,7 +3554,7 @@ index d968038..33fe9ee 100644
  static void DrawEngine(BOOL isSub) {
    const char *zoneName;
    zoneName = isSub ? "DrawEngine (SUB)" : "DrawEngine (MAIN)";
-@@ -675,11 +713,21 @@ static void DrawEngine(BOOL isSub) {
+@@ -675,11 +715,21 @@ static void DrawEngine(BOOL isSub) {
      memset(objWindowTex, 0, sizeof(objWindowTex));
    }
  
@@ -3532,7 +3578,7 @@ index d968038..33fe9ee 100644
        u8 *pixelBuf;
        u8 *objWindowBuf = isSub ? objWindowsTex : objWindowTex;
        switch (bgnum) {
-@@ -739,8 +787,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -739,8 +789,7 @@ static void DrawEngine(BOOL isSub) {
    // write all OAMs to the textures based on their priorities
    for (int i = 0; i < 4; i++) {
      glActiveTexture(GL_TEXTURE0 + s_objTexUnits[i]);
@@ -3542,7 +3588,7 @@ index d968038..33fe9ee 100644
      switch (i) {
      case 0:
        oamPixelBuf = isSub ? oam0sTex : oam0Tex;
-@@ -759,9 +806,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -759,9 +808,7 @@ static void DrawEngine(BOOL isSub) {
        oamPixelBuf = NULL;
        break;
      }
@@ -3553,7 +3599,7 @@ index d968038..33fe9ee 100644
    }
  
    glActiveTexture(GL_TEXTURE0 + s_bgTexUnits[0]);
-@@ -770,7 +815,8 @@ static void DrawEngine(BOOL isSub) {
+@@ -770,7 +817,8 @@ static void DrawEngine(BOOL isSub) {
      if (bg0as3d) {
        glBindTexture(GL_TEXTURE_2D, g3RenderTextureId);
      } else {
@@ -3563,7 +3609,7 @@ index d968038..33fe9ee 100644
      }
    } else {
      glBindTexture(GL_TEXTURE_2D, dummyScreenTextureId);
-@@ -778,11 +824,8 @@ static void DrawEngine(BOOL isSub) {
+@@ -778,11 +826,8 @@ static void DrawEngine(BOOL isSub) {
  
    // Setup the OBJWindow texture
    glActiveTexture(GL_TEXTURE0 + s_objWindowTexUnit);
@@ -3576,7 +3622,7 @@ index d968038..33fe9ee 100644
    glProgramUniform1i(
        g2shaderProgramID,
        glGetUniformLocation(g2shaderProgramID, "objWindowTexture"),
-@@ -818,6 +861,18 @@ static void DrawEngine(BOOL isSub) {
+@@ -818,6 +863,18 @@ static void DrawEngine(BOOL isSub) {
                       glGetUniformLocation(g2shaderProgramID, "bg0as3d"),
                       bg0as3d);
  
@@ -3595,7 +3641,7 @@ index d968038..33fe9ee 100644
    // Pass master bright info to the shader
    float masterBrightFactor = isSub
                                   ? (float)(s_reg_GXS_DB_MASTER_BRIGHT & 0b11111)
-@@ -969,7 +1024,6 @@ void *SIM_Render(void *arg) {
+@@ -969,7 +1026,6 @@ void *SIM_Render(void *arg) {
  
      // Unbind 3D Framebuffer
      glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3603,7 +3649,7 @@ index d968038..33fe9ee 100644
      glUseProgram(g2shaderProgramID);
  
      glDisable(GL_DEPTH_TEST);
-@@ -982,6 +1036,8 @@ void *SIM_Render(void *arg) {
+@@ -982,6 +1038,8 @@ void *SIM_Render(void *arg) {
      int viewX = 0;
      int viewY = 0;
      float aspectRatio;
@@ -3612,7 +3658,7 @@ index d968038..33fe9ee 100644
  
      SDL_GetWindowSize(window, &windowWidth, &windowHeight);
  
-@@ -989,15 +1045,19 @@ void *SIM_Render(void *arg) {
+@@ -989,15 +1047,19 @@ void *SIM_Render(void *arg) {
      switch (s_SIM_config.screenLayout) {
      default:
      case SIM_CONFIG_SCREEN_LAYOUT_VERTICAL:
@@ -3635,7 +3681,7 @@ index d968038..33fe9ee 100644
  
      viewWidth = windowWidth;
      viewHeight = (int)((float)windowWidth / aspectRatio);
-@@ -1010,7 +1070,38 @@ void *SIM_Render(void *arg) {
+@@ -1010,7 +1072,57 @@ void *SIM_Render(void *arg) {
        viewY = 0;
      }
  
@@ -3672,10 +3718,29 @@ index d968038..33fe9ee 100644
 +    }
 +
 +    glViewport(viewPixelX, viewPixelY, viewPixelWidth, viewPixelHeight);
++
++    // Render the 3D at the window's pixel density. Anything above it isn't
++    // visible, since the compositor samples the 3D layer with plain linear
++    // filtering, so it would only cost GPU time. Rounded up to stay sharp.
++    if (s_SIM_config.autoInternalResolution) {
++      // Height of the biggest DS screen in the window: the vertical layout
++      // stacks two, the others show one at the full view height
++      int screenPixelHeight =
++          s_SIM_config.screenLayout == SIM_CONFIG_SCREEN_LAYOUT_VERTICAL
++              ? viewPixelHeight / 2
++              : viewPixelHeight;
++      u32 autoScale = (screenPixelHeight + SIM_NDS_SCREEN_HEIGHT - 1) /
++                      SIM_NDS_SCREEN_HEIGHT;
++      autoScale = std::clamp<u32>(autoScale, 1, 20);
++      if (autoScale != s_SIM_config.internalResolutionScale) {
++        s_SIM_config.internalResolutionScale = autoScale;
++        SIM_SetInternalResolutionAfterRender(autoScale);
++      }
++    }
  
      // Set up the bounding box of the touch panel
      if (s_SIM_config.swapScreens) {
-@@ -1074,8 +1165,25 @@ void *SIM_Render(void *arg) {
+@@ -1074,8 +1186,25 @@ void *SIM_Render(void *arg) {
            break;
          }
        }
@@ -3701,7 +3766,15 @@ index d968038..33fe9ee 100644
          if (keyRead == s_SIM_config.padSettings.aKey) {
            // A Button
            s_reg_PAD_KEYINPUT = s_reg_PAD_KEYINPUT & 0b1111111111111110;
-@@ -1352,9 +1460,8 @@ void *SIM_Render(void *arg) {
+@@ -1329,6 +1458,7 @@ void *SIM_Render(void *arg) {
+ 
+     if(sChangeInternalResAfterRender) {
+       SIM_SetInternalResolution(sPendingInternalRes);
++      sChangeInternalResAfterRender = false;
+     }
+ 
+     //Calculate full frametime (after swap)
+@@ -1352,20 +1482,13 @@ void *SIM_Render(void *arg) {
      glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
    } while (SIM::GUI::IsGameLogicPaused());
@@ -3710,8 +3783,23 @@ index d968038..33fe9ee 100644
    glBindFramebuffer(GL_FRAMEBUFFER, g3FrameBuffer);
 -  glBindRenderbuffer(GL_RENDERBUFFER, g3RenderBufferId);
  
-   // Setup 3D Viewport
-   if (s_reg_GX_POWCNT >> 15) {
+-  // Setup 3D Viewport
+-  if (s_reg_GX_POWCNT >> 15) {
+-    glViewport(0, SIM_NDS_SCREEN_HEIGHT * s_SIM_config.internalResolutionScale,
+-               SIM_NDS_SCREEN_WIDTH * s_SIM_config.internalResolutionScale,
+-               SIM_NDS_SCREEN_HEIGHT * s_SIM_config.internalResolutionScale);
+-  } else {
+-    glViewport(0, 0,
+-               SIM_NDS_SCREEN_WIDTH * s_SIM_config.internalResolutionScale,
+-               SIM_NDS_SCREEN_HEIGHT * s_SIM_config.internalResolutionScale);
+-  }
++  // Setup 3D Viewport. The framebuffer is one screen tall, whichever screen
++  // the 3D engine is on
++  glViewport(0, 0, SIM_NDS_SCREEN_WIDTH * s_SIM_config.internalResolutionScale,
++             SIM_NDS_SCREEN_HEIGHT * s_SIM_config.internalResolutionScale);
+ 
+   // Activate 3D shader
+   glUseProgram(g3shaderProgramID);
 diff --git a/libraries/sim/src/sim_post_effects.cpp b/libraries/sim/src/sim_post_effects.cpp
 new file mode 100644
 index 0000000..59b13bd
