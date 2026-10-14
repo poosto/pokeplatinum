@@ -78,6 +78,10 @@
 #include "script_manager.h"
 #include "system.h"
 #include "unk_0202419C.h"
+
+#ifdef SDK_PORT
+#include <simulator/sim_post_effects.h>
+#endif
 #include "unk_020559DC.h"
 #include "vram_transfer.h"
 
@@ -691,6 +695,9 @@ static void ov5_021D15F4(FieldSystem *fieldSystem)
 
     PokeRadar_ClearIfAllOutOfView(fieldSystem);
     FieldPointLights_Update(fieldSystem->landDataMan, AreaDataManager_IsOutdoorsLighting(fieldSystem->areaDataManager));
+#ifdef SDK_PORT
+    SIM_PostFX_Request();
+#endif
     LandDataManager_RenderLoadedMaps(fieldSystem->landDataMan, fieldSystem->areaModelAttrs);
 
     if (FieldMap_InDistortionWorld(fieldSystem) == TRUE) {

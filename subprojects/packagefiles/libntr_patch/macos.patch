@@ -134,6 +134,46 @@ index 0000000..a2173d2
 +#endif
 +
 +#endif
+diff --git a/include/simulator/sim_post_effects.h b/include/simulator/sim_post_effects.h
+new file mode 100644
+index 0000000..88b971c
+--- /dev/null
++++ b/include/simulator/sim_post_effects.h
+@@ -0,0 +1,34 @@
++#ifndef SIM_POST_EFFECTS_H
++#define SIM_POST_EFFECTS_H
++
++#include <nitro/types.h>
++
++typedef struct SIM_TiltShiftSettings {
++    BOOL enabled;
++    float maxBlur;     /* Blur radius at the screen edges, in DS pixels */
++    float focusY;      /* Middle of the sharp band, 0 at one screen edge and 1 at the other */
++    float focusSize;   /* Half the height of the sharp band, as a fraction of the screen */
++} SIM_TiltShiftSettings;
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The game calls this every frame it wants post effects (tilt-shift) on the 3D
++   layer, i.e. the overworld. Scenes that don't ask are left untouched. */
++void SIM_PostFX_Request(void);
++
++SIM_TiltShiftSettings * SIM_PostFX_GetTiltShiftSettings(void);
++
++/* Called when the 3D buffers are swapped: the frame being composited next uses
++   whatever was requested while it was drawn */
++void G3SIM_PostFX_LatchFrame(void);
++
++/* Blur radius to composite the main engine's 3D layer with, 0 when off */
++float G3SIM_PostFX_GetTiltShiftBlur(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
 diff --git a/include/simulator/sim_rtc.h b/include/simulator/sim_rtc.h
 new file mode 100644
 index 0000000..aa8a647
@@ -425,18 +465,19 @@ index 2cb19b4..ffa264c 100644
  }
 \ No newline at end of file
 diff --git a/libraries/sim/src/g3_handler.cpp b/libraries/sim/src/g3_handler.cpp
-index 1ded67d..61d91df 100644
+index 1ded67d..484150e 100644
 --- a/libraries/sim/src/g3_handler.cpp
 +++ b/libraries/sim/src/g3_handler.cpp
-@@ -20,6 +20,7 @@
+@@ -20,6 +20,8 @@
  #include <simulator/g3_handler.h>
  #include <simulator/g3_draw.h>
  #include <simulator/sim.h>
 +#include <simulator/sim_g3_lights.h>
++#include <simulator/sim_post_effects.h>
  
  #ifdef SDK_TRACY_ENABLE
  #include "tracy/TracyC.h"
-@@ -53,6 +54,7 @@ static G3SIM_Matrix_t currentTextureMatrix = {0};
+@@ -53,6 +55,7 @@ static G3SIM_Matrix_t currentTextureMatrix = {0};
  static G3SIM_Matrix_t currentClipMatrix = {0};
  
  static u8 s_G3LightColor [4][3];
@@ -444,7 +485,7 @@ index 1ded67d..61d91df 100644
  static float s_G3LightVector[4][3];
  
  u8 s_G3numInPoly = 0;
-@@ -66,10 +68,13 @@ GLfloat s_g3NextTexCoordT;
+@@ -66,10 +69,13 @@ GLfloat s_g3NextTexCoordT;
  G3SIM_FxVtx_t s_g3PolygonVerts[4];
  
  u8 s_g3CurColor[3] = {0};
@@ -458,7 +499,7 @@ index 1ded67d..61d91df 100644
  G3SIM_PolygonAttr_t s_curPolygonAttr;
  
  static u8 s_swapBuffersCalledThisFrame;
-@@ -81,6 +86,26 @@ extern u8 s_SIM_useWBuffer;
+@@ -81,6 +87,26 @@ extern u8 s_SIM_useWBuffer;
  
  static void CommonDebugCommandHandling(draw_command_type_t aCommand);
  
@@ -485,7 +526,7 @@ index 1ded67d..61d91df 100644
  static float GetVtxPosition(G3SIM_Vertex_t * vtx, int comp)
  {
      switch(comp){
-@@ -414,7 +439,9 @@ void G3SIM_Begin(GXBegin type)
+@@ -414,7 +440,9 @@ void G3SIM_Begin(GXBegin type)
      }
      snprintf(debugMessage, 50, "GX_Begin %s", typeString);
  
@@ -496,7 +537,7 @@ index 1ded67d..61d91df 100644
      s_primType = type;
      s_G3numInPoly = 0;
      s_G3drawPoly = 0;
-@@ -862,30 +889,16 @@ void G3SIM_LightColor(u32 data)
+@@ -862,30 +890,16 @@ void G3SIM_LightColor(u32 data)
  
  void G3SIM_LightVector(u32 data)
  {
@@ -535,7 +576,7 @@ index 1ded67d..61d91df 100644
  }
  
  //Load Matrix
-@@ -1240,11 +1253,18 @@ void G3SIM_MtxScale(fx32 * scale)
+@@ -1240,11 +1254,18 @@ void G3SIM_MtxScale(fx32 * scale)
      
      G3SIM_Matrix_t * currentMatrix = getCurrentMatrix();
  
@@ -555,7 +596,7 @@ index 1ded67d..61d91df 100644
              if( s_curMtxMode == GX_MTXMODE_POSITION_VECTOR )
              {
                  //Also multiply the position matrix
-@@ -1310,44 +1330,15 @@ void G3SIM_MtxTranslate(fx32* trans)
+@@ -1310,44 +1331,15 @@ void G3SIM_MtxTranslate(fx32* trans)
  
  void G3SIM_Normal(u32 data)
  {
@@ -605,7 +646,7 @@ index 1ded67d..61d91df 100644
  
      // Calculate the color
  
-@@ -1362,19 +1353,7 @@ void G3SIM_Normal(u32 data)
+@@ -1362,19 +1354,7 @@ void G3SIM_Normal(u32 data)
          {
              // Light is enabled
  
@@ -626,7 +667,7 @@ index 1ded67d..61d91df 100644
  
              //Calculate Diffuse level
              float diffuseLevel = (lightVector[0] * normalVector[0])
-@@ -1386,10 +1365,23 @@ void G3SIM_Normal(u32 data)
+@@ -1386,10 +1366,23 @@ void G3SIM_Normal(u32 data)
                  diffuseLevel = 0.0f;
              }
  
@@ -653,7 +694,7 @@ index 1ded67d..61d91df 100644
  
              //Diffuse color
              color[0] = color[0] + (((float)s_g3DiffuseColor[0] / 255.0f) * ((float)s_G3LightColor[lightNum][0] / 255.0f) * diffuseLevel); // * DiffuseLevel TODO
-@@ -1427,8 +1419,9 @@ void G3SIM_PolygonAttr(u32 data)
+@@ -1427,8 +1420,9 @@ void G3SIM_PolygonAttr(u32 data)
      u8 cullMode = (data & 0b11000000) >> 6;
      u8 depthTest = (data & 0b100000000000000) >> 14;
      u8 useFog = (data & 0b1000000000000000) >> 15;
@@ -664,7 +705,7 @@ index 1ded67d..61d91df 100644
      {
          // Flush the vertex buffer
          G3SIM_FlushArray();
-@@ -1449,6 +1442,7 @@ void G3SIM_PolygonAttr(u32 data)
+@@ -1449,6 +1443,7 @@ void G3SIM_PolygonAttr(u32 data)
      s_curPolygonAttr.alphaInt = alpha;
      s_curPolygonAttr.depthTest = depthTest;
      s_curPolygonAttr.fogEnable = useFog;
@@ -672,7 +713,7 @@ index 1ded67d..61d91df 100644
  
      if(alpha == 31){
          s_curPolygonAttr.alpha = 1.0f;
-@@ -1483,16 +1477,13 @@ void G3SIM_SpecEmi(u32 data)
+@@ -1483,16 +1478,13 @@ void G3SIM_SpecEmi(u32 data)
      u8 specularRed = (data & 0b11111);
      u8 specularGreen = (data & 0b1111100000) >> 5;
      u8 specularBlue = (data & 0b111110000000000) >> 10;
@@ -692,16 +733,17 @@ index 1ded67d..61d91df 100644
      s_g3SpecularColor[0] = specularRed << 3;
      s_g3SpecularColor[1] = specularGreen << 3;
      s_g3SpecularColor[2] = specularBlue << 3;
-@@ -1507,6 +1498,8 @@ void G3SIM_SwapBuffers(u8 depthBufferMode)
+@@ -1507,6 +1499,9 @@ void G3SIM_SwapBuffers(u8 depthBufferMode)
  {
      s_SIM_useWBuffer = depthBufferMode;
      s_swapBuffersCalledThisFrame = TRUE;
 +    G3SIM_ClearFramePointLights();
 +    G3SIM_ClearFrameGlow();
++    G3SIM_PostFX_LatchFrame();
  }
  
  u8 G3SIM_SwapBuffersCalledThisFrame()
-@@ -1597,6 +1590,23 @@ void G3SIM_Vtx(s16 x, s16 y, s16 z)
+@@ -1597,6 +1592,23 @@ void G3SIM_Vtx(s16 x, s16 y, s16 z)
      fxZ = z;
      fxW = FX32_ONE;
  
@@ -725,7 +767,7 @@ index 1ded67d..61d91df 100644
      calculateVtxFx(&fxX, &fxY, &fxZ, &fxW);
  
      s_g3PolygonVerts[s_G3numInPoly].x = fxX;
-@@ -1687,6 +1697,13 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+@@ -1687,6 +1699,13 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
          glVerts[i].g = curVtx->g;
          glVerts[i].b = curVtx->b;
          glVerts[i].a = curVtx->a;
@@ -739,7 +781,7 @@ index 1ded67d..61d91df 100644
      }
  
      // Get the W size and remove the polygon if W is 0
-@@ -1776,3 +1793,8 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
+@@ -1776,3 +1795,8 @@ void G3SIM_SubmitPolygon(G3SIM_FxVtx_t * fxVerts, int numVerts) {
  
  
  }
@@ -749,10 +791,10 @@ index 1ded67d..61d91df 100644
 +    return &currentProjectionMatrix;
 +}
 diff --git a/libraries/sim/src/meson.build b/libraries/sim/src/meson.build
-index 80e30d5..e6c396f 100644
+index 80e30d5..5e61efb 100644
 --- a/libraries/sim/src/meson.build
 +++ b/libraries/sim/src/meson.build
-@@ -20,10 +20,13 @@ libsim_srcs = files(
+@@ -20,14 +20,18 @@ libsim_srcs = files(
      'sim_debug.cpp',
      'sim_g2.cpp',
      'sim_g3_CommandProcessor.cpp',
@@ -766,8 +808,13 @@ index 80e30d5..e6c396f 100644
      'sim_gui_net.cpp',
      'sim_gui_pad.cpp',
      'sim_main.cpp',
+     'sim_net.cpp',
++    'sim_post_effects.cpp',
+     'sim_RomExtractor.cpp',
+     'sim_screenquads.c',
+     'sim_shaders.cpp',
 diff --git a/libraries/sim/src/shaders/g2_fragment.glsl b/libraries/sim/src/shaders/g2_fragment.glsl
-index b652bd5..367234f 100644
+index b652bd5..86b73ed 100644
 --- a/libraries/sim/src/shaders/g2_fragment.glsl
 +++ b/libraries/sim/src/shaders/g2_fragment.glsl
 @@ -1,5 +1,5 @@
@@ -777,7 +824,157 @@ index b652bd5..367234f 100644
  
  uniform sampler2D myTexture;
  uniform sampler2D bgTexture[4];
-@@ -142,4 +142,4 @@ void main()
+@@ -16,13 +16,67 @@ uniform int dispcnt;
+ uniform int winout;
+ uniform int bg0as3d;
+ 
++// Tilt-shift on the 3D layer: blur radius in DS pixels (0 when off), and the
++// sharp band's middle and half height as fractions of the screen
++uniform float tiltShiftBlur;
++uniform float tiltShiftFocusY;
++uniform float tiltShiftFocusSize;
++
+ smooth in vec2 fragTexCoord;
+ //uniform float inAlpha;
+ uniform float inMasterBrightFactor;
+ uniform int inMasterBrightMode;
+ out vec4 color;
++
++const vec2 dsTexSize = vec2(256.0, 384.0); // Both screens stacked
++const vec2 blurTaps[12] = vec2[12](
++    vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457),
++    vec2(-0.203, 0.621), vec2(0.962, -0.195), vec2(0.473, -0.480),
++    vec2(0.519, 0.767), vec2(0.185, -0.893), vec2(0.507, 0.064),
++    vec2(0.896, 0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598)
++);
++
++vec4 bg0Color;
++
++// The 3D layer, blurred away from the focus band. Blurred areas are sampled at
++// DS pixel centers so they stay blocky like the rest of the screen
++vec4 Sample3DLayer()
++{
++    vec4 sharp = texture(bgTexture[0], fragTexCoord);
++    if (tiltShiftBlur <= 0.0 || bg0as3d == 0) {
++        return sharp;
++    }
++
++    // Each screen is half of the texture
++    float screenStart = fragTexCoord.t >= 0.5 ? 0.5 : 0.0;
++    float screenY = (fragTexCoord.t - screenStart) * 2.0;
++    float amount = smoothstep(tiltShiftFocusSize, tiltShiftFocusSize + 0.3, abs(screenY - tiltShiftFocusY));
++    if (amount <= 0.0) {
++        return sharp;
++    }
++
++    vec2 dsPixel = (floor(fragTexCoord * dsTexSize) + 0.5) / dsTexSize;
++    float radius = amount * tiltShiftBlur;
++    float minT = screenStart + 0.5 / dsTexSize.y;
++    float maxT = screenStart + 0.5 - 0.5 / dsTexSize.y;
++
++    vec4 sum = texture(bgTexture[0], dsPixel);
++    for (int i = 0; i < 12; i++) {
++        vec2 uv = dsPixel + blurTaps[i] * radius / dsTexSize;
++        uv.t = clamp(uv.t, minT, maxT); // Don't bleed into the other screen
++        sum += texture(bgTexture[0], uv);
++    }
++    return mix(sharp, sum / 13.0, smoothstep(0.0, 0.25, amount));
++}
++
++vec4 bgSample(int bgNum)
++{
++    return bgNum == 0 ? bg0Color : texture(bgTexture[bgNum], fragTexCoord);
++}
++
+ void main()
+ {
++    bg0Color = Sample3DLayer();
+     int oamsDrawn = 0;
+     int currentBgDrawn = 5; // Backdrop
+     bool objWindowEnabled = ((dispcnt >> 15) & 1) == 1;
+@@ -61,59 +115,59 @@ void main()
+             }
+         }
+         // Draw the current bg
+-        if(texture(bgTexture[bgNum], fragTexCoord).a > 0.1) {
++        if(bgSample(bgNum).a > 0.1) {
+             //Handle blending
+             if( (((bldcnt >> 6) & 0x3) == 1) && ((bldcnt >> bgNum & 1) == 1) ){
+                 // Alpha Blending Mode. bgNum is Target 1.
+                 float alphaA = min(16.0, float(bldalpha & 31)) / 16.0;
+                 float alphaB = min(16.0, float((bldalpha >> 8) & 31)) / 16.0;
+                 if(bgNum == 0 && bg0as3d != 0) {
+-                    alphaA = texture(bgTexture[0], fragTexCoord).a;
++                    alphaA = bgSample(0).a;
+                     alphaB = 1.0 - alphaA;
+                 }
+                 if((currentBgDrawn < 4) && (((bldcnt >> (8+currentBgDrawn)) & 1) == 1) ) {
+-                    color.r = min(1.0, ((texture(bgTexture[bgNum], fragTexCoord).r *alphaA) + (texture(bgTexture[currentBgDrawn], fragTexCoord).r * alphaB)));
+-                    color.g = min(1.0, ((texture(bgTexture[bgNum], fragTexCoord).g *alphaA) + (texture(bgTexture[currentBgDrawn], fragTexCoord).g * alphaB)));
+-                    color.b = min(1.0, ((texture(bgTexture[bgNum], fragTexCoord).b *alphaA) + (texture(bgTexture[currentBgDrawn], fragTexCoord).b * alphaB)));
++                    color.r = min(1.0, ((bgSample(bgNum).r *alphaA) + (bgSample(currentBgDrawn).r * alphaB)));
++                    color.g = min(1.0, ((bgSample(bgNum).g *alphaA) + (bgSample(currentBgDrawn).g * alphaB)));
++                    color.b = min(1.0, ((bgSample(bgNum).b *alphaA) + (bgSample(currentBgDrawn).b * alphaB)));
+                     color.a = 1.0;
+                     currentBgDrawn = bgNum;
+                 } else if( (currentBgDrawn == 4) && ( ( (bldcnt >> (8+currentBgDrawn)) & 1) == 1) ){
+                     // Alpha blending where the highest OBJ pixel is the target
+-                    color.r = min(1.0, ( (texture(bgTexture[bgNum], fragTexCoord).r *alphaA) + color.r * alphaB) );
+-                    color.g = min(1.0, ( (texture(bgTexture[bgNum], fragTexCoord).g *alphaA) + color.g * alphaB) );
+-                    color.b = min(1.0, ( (texture(bgTexture[bgNum], fragTexCoord).b *alphaA) + color.b * alphaB) );
++                    color.r = min(1.0, ( (bgSample(bgNum).r *alphaA) + color.r * alphaB) );
++                    color.g = min(1.0, ( (bgSample(bgNum).g *alphaA) + color.g * alphaB) );
++                    color.b = min(1.0, ( (bgSample(bgNum).b *alphaA) + color.b * alphaB) );
+                     color.a = 1.0;
+                 } else if((currentBgDrawn == 5) && (((bldcnt >> (8+currentBgDrawn)) & 1) == 1)) {
+                     // Alpha blending where the backdrop is the target
+-                    color.r = min(1.0, ((texture(bgTexture[bgNum], fragTexCoord).r *alphaA) + backdropColor.r * alphaB));
+-                    color.g = min(1.0, ((texture(bgTexture[bgNum], fragTexCoord).g *alphaA) + backdropColor.g * alphaB));
+-                    color.b = min(1.0, ((texture(bgTexture[bgNum], fragTexCoord).b *alphaA) + backdropColor.b * alphaB));
++                    color.r = min(1.0, ((bgSample(bgNum).r *alphaA) + backdropColor.r * alphaB));
++                    color.g = min(1.0, ((bgSample(bgNum).g *alphaA) + backdropColor.g * alphaB));
++                    color.b = min(1.0, ((bgSample(bgNum).b *alphaA) + backdropColor.b * alphaB));
+                     color.a = 1.0;
+                 } else {
+-                    color = texture(bgTexture[bgNum], fragTexCoord);
++                    color = bgSample(bgNum);
+                     currentBgDrawn = bgNum;
+                 }
+             } else if((((bldcnt >> 6) & 0x3) == 2) && ((bldcnt >> bgNum & 1) == 1)) {
+                 // Brightness Increase Mode. bgNum is Target 1.
+                 float brightFactor = min(16.0, float(bldy & 31)) / 16.0;
+-                //color.r = min(1.0, ( texture(bgTexture[bgNum], fragTexCoord).r + ((1.0 - texture(bgTexture[bgNum], fragTexCoord).r)*brightFactor)) );
+-                //color.g = min(1.0, ( texture(bgTexture[bgNum], fragTexCoord).g + ((1.0 - texture(bgTexture[bgNum], fragTexCoord).g)*brightFactor)) );
+-                //color.b = min(1.0, ( texture(bgTexture[bgNum], fragTexCoord).b + ((1.0 - texture(bgTexture[bgNum], fragTexCoord).b)*brightFactor)) );
+-                color.r = texture(bgTexture[bgNum], fragTexCoord).r + (1.0 - texture(bgTexture[bgNum], fragTexCoord).r)*brightFactor;
+-                color.g = texture(bgTexture[bgNum], fragTexCoord).g + (1.0 - texture(bgTexture[bgNum], fragTexCoord).g)*brightFactor;
+-                color.b = texture(bgTexture[bgNum], fragTexCoord).b + (1.0 - texture(bgTexture[bgNum], fragTexCoord).b)*brightFactor;
++                //color.r = min(1.0, ( bgSample(bgNum).r + ((1.0 - bgSample(bgNum).r)*brightFactor)) );
++                //color.g = min(1.0, ( bgSample(bgNum).g + ((1.0 - bgSample(bgNum).g)*brightFactor)) );
++                //color.b = min(1.0, ( bgSample(bgNum).b + ((1.0 - bgSample(bgNum).b)*brightFactor)) );
++                color.r = bgSample(bgNum).r + (1.0 - bgSample(bgNum).r)*brightFactor;
++                color.g = bgSample(bgNum).g + (1.0 - bgSample(bgNum).g)*brightFactor;
++                color.b = bgSample(bgNum).b + (1.0 - bgSample(bgNum).b)*brightFactor;
+                 color.a = 1.0;
+                 currentBgDrawn = bgNum;
+             } else if((((bldcnt >> 6) & 0x3) == 3) && ((bldcnt >> bgNum & 1) == 1)) {
+                 // Brightness Decrease Mode. bgNum is Target 1.
+                 float brightFactor = min(16.0, float(bldy & 31)) / 16.0;
+-                color.r = max(0.0, ( texture(bgTexture[bgNum], fragTexCoord).r - ((texture(bgTexture[bgNum], fragTexCoord).r)*brightFactor)) );
+-                color.g = max(0.0, ( texture(bgTexture[bgNum], fragTexCoord).g - ((texture(bgTexture[bgNum], fragTexCoord).g)*brightFactor)) );
+-                color.b = max(0.0, ( texture(bgTexture[bgNum], fragTexCoord).b - ((texture(bgTexture[bgNum], fragTexCoord).b)*brightFactor)) );
++                color.r = max(0.0, ( bgSample(bgNum).r - ((bgSample(bgNum).r)*brightFactor)) );
++                color.g = max(0.0, ( bgSample(bgNum).g - ((bgSample(bgNum).g)*brightFactor)) );
++                color.b = max(0.0, ( bgSample(bgNum).b - ((bgSample(bgNum).b)*brightFactor)) );
+                 color.a = 1.0;
+                 currentBgDrawn = bgNum;
+             } else {
+-                color.rgb = texture(bgTexture[bgNum], fragTexCoord).rgb;
++                color.rgb = bgSample(bgNum).rgb;
+                 color.a = 1.0;
+                 currentBgDrawn = bgNum;
+             }
+@@ -142,4 +196,4 @@ void main()
          color.b = color.b - (color.b * (inMasterBrightFactor / 16.0));
      }
  }
@@ -1167,7 +1364,7 @@ index 0000000..726f084
 +        sGlowColor[0], sGlowColor[1], sGlowColor[2], glow ? sGlowColor[3] : 0.0f);
 +}
 diff --git a/libraries/sim/src/sim_gui.cpp b/libraries/sim/src/sim_gui.cpp
-index 95b3b71..fe4bf4e 100644
+index 95b3b71..8f57607 100644
 --- a/libraries/sim/src/sim_gui.cpp
 +++ b/libraries/sim/src/sim_gui.cpp
 @@ -20,6 +20,8 @@ static constexpr ImVec2 sButtonSize = {100, 20};
@@ -1193,7 +1390,7 @@ index 95b3b71..fe4bf4e 100644
          AppButton("Input", &sShowAppPad, AppPadInit, AppPadMain);
          AppButton("Multiplayer", &sShowAppNet, AppNetInit, AppNetMain);
 +        AppButton("Clock", &sShowAppClock, AppClockInit, AppClockMain);
-+        AppButton("Lighting", &sShowAppLighting, AppLightingInit, AppLightingMain);
++        AppButton("Graphics", &sShowAppLighting, AppLightingInit, AppLightingMain);
          AppButton("ImGui Demo", &sShowImGuiDemo, nullptr, ImGui::ShowDemoWindow);
          AppButton("Application", &sShowWindowPrjSpecific, nullptr, PrjMain);
  
@@ -1301,12 +1498,13 @@ index 4cc4aa3..e12e3f7 100644
          } else {
 diff --git a/libraries/sim/src/sim_gui_lighting.cpp b/libraries/sim/src/sim_gui_lighting.cpp
 new file mode 100644
-index 0000000..678253e
+index 0000000..5b9c859
 --- /dev/null
 +++ b/libraries/sim/src/sim_gui_lighting.cpp
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,41 @@
 +#include "simulator/sim_gui.hpp"
 +#include "simulator/sim_g3_lights.h"
++#include "simulator/sim_post_effects.h"
 +
 +#include "simulator/imgui/imgui.hpp"
 +
@@ -1318,8 +1516,9 @@ index 0000000..678253e
 +}
 +
 +void AppLightingMain(bool * openState) {
-+    ImGui::Begin("Lighting", openState);
++    ImGui::Begin("Graphics", openState);
 +
++    ImGui::SeparatorText("Point lights");
 +    int bands = SIM_G3_GetPointLightBands();
 +    if(ImGui::SliderInt("Falloff bands", &bands, 0, 16, bands == 0 ? "Smooth" : "%d")) {
 +        SIM_G3_SetPointLightBands(bands);
@@ -1330,12 +1529,22 @@ index 0000000..678253e
 +        SIM_G3_SetPointLightDebugView(debugView);
 +    }
 +
++    ImGui::SeparatorText("Tilt-shift");
++    SIM_TiltShiftSettings * tiltShift = SIM_PostFX_GetTiltShiftSettings();
++    bool tiltShiftEnabled = tiltShift->enabled;
++    if(ImGui::Checkbox("Enabled", &tiltShiftEnabled)) {
++        tiltShift->enabled = tiltShiftEnabled;
++    }
++    ImGui::SliderFloat("Blur", &tiltShift->maxBlur, 0.5f, 6.0f, "%.1f DS px");
++    ImGui::SliderFloat("Focus position", &tiltShift->focusY, 0.0f, 1.0f, "%.2f");
++    ImGui::SliderFloat("Focus size", &tiltShift->focusSize, 0.0f, 0.5f, "%.2f");
++
 +    ImGui::End();
 +}
 +
 +}
 diff --git a/libraries/sim/src/sim_main.cpp b/libraries/sim/src/sim_main.cpp
-index d968038..7f6014b 100644
+index d968038..eafc3c6 100644
 --- a/libraries/sim/src/sim_main.cpp
 +++ b/libraries/sim/src/sim_main.cpp
 @@ -1,8 +1,11 @@
@@ -1350,7 +1559,15 @@ index d968038..7f6014b 100644
  #include <string>
  #include <pthread.h>
  #include <SDL2/SDL.h>
-@@ -134,12 +137,15 @@ static GLuint fboId;
+@@ -17,6 +20,7 @@ extern "C" int NitroSpMain(void *arg);
+ #include <simulator/sim_audio.h>
+ #include <simulator/sim_net.h>
+ #include <simulator/sim_shaders.hpp>
++#include <simulator/sim_post_effects.h>
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -134,12 +138,15 @@ static GLuint fboId;
  static GLuint g2FrameBuffer;
  
  // Texture Objects
@@ -1369,7 +1586,7 @@ index d968038..7f6014b 100644
  
  GLint s_bgTexUnits[] = {0, 1, 2, 3};
  static GLint s_objTexUnits[] = {4, 5, 6, 7, 8};
-@@ -155,8 +161,8 @@ static GLuint g2vertexArray;
+@@ -155,8 +162,8 @@ static GLuint g2vertexArray;
  // VBOs
  static GLuint g2vertexBuffer;
  
@@ -1380,7 +1597,7 @@ index d968038..7f6014b 100644
  
  // Shaders
  static GLint g2VertexShader;
-@@ -293,11 +299,11 @@ void SIM_SetInternalResolution(int internalRes) {
+@@ -293,11 +300,11 @@ void SIM_SetInternalResolution(int internalRes) {
                 SIM_NDS_SCREEN_HEIGHT * 2 * s_SIM_config.internalResolutionScale,
                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
  
@@ -1397,7 +1614,7 @@ index d968038..7f6014b 100644
  }
  
  static bool sChangeInternalResAfterRender = false;
-@@ -314,8 +320,14 @@ void *SIM_RenderInit(void *arg) {
+@@ -314,8 +321,14 @@ void *SIM_RenderInit(void *arg) {
             SDL_INIT_JOYSTICK);
    SIM_Audio_Init(44100);
  
@@ -1412,7 +1629,7 @@ index d968038..7f6014b 100644
    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-@@ -378,7 +390,8 @@ void *SIM_RenderInit(void *arg) {
+@@ -378,7 +391,8 @@ void *SIM_RenderInit(void *arg) {
  
    window = SDL_CreateWindow(
        windowTitle.c_str(), 100, 100, windowWidth, windowHeight,
@@ -1422,7 +1639,7 @@ index d968038..7f6014b 100644
    context = SDL_GL_CreateContext(window);
  
    if(s_SIM_config.fullScreen) {
-@@ -392,8 +405,10 @@ void *SIM_RenderInit(void *arg) {
+@@ -392,8 +406,10 @@ void *SIM_RenderInit(void *arg) {
    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
    glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
@@ -1435,7 +1652,7 @@ index d968038..7f6014b 100644
  
    GLenum glErrCode;
    GLint status;
-@@ -401,12 +416,12 @@ void *SIM_RenderInit(void *arg) {
+@@ -401,12 +417,12 @@ void *SIM_RenderInit(void *arg) {
  
    GLchar *errorBuf;
  
@@ -1452,7 +1669,7 @@ index d968038..7f6014b 100644
  
      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-@@ -417,12 +432,12 @@ void *SIM_RenderInit(void *arg) {
+@@ -417,12 +433,12 @@ void *SIM_RenderInit(void *arg) {
                   SIM_NDS_SCREEN_HEIGHT * 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
    }
  
@@ -1469,7 +1686,7 @@ index d968038..7f6014b 100644
  
      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-@@ -483,7 +498,9 @@ void *SIM_RenderInit(void *arg) {
+@@ -483,7 +499,9 @@ void *SIM_RenderInit(void *arg) {
  
    GenerateTexture(dummyScreenTextureId, SIM_NDS_SCREEN_WIDTH,
                    SIM_NDS_SCREEN_HEIGHT * 2);
@@ -1480,7 +1697,7 @@ index d968038..7f6014b 100644
                    SIM_NDS_SCREEN_HEIGHT * 2);
  
    // 3D Framebuffer render texture
-@@ -498,11 +515,16 @@ void *SIM_RenderInit(void *arg) {
+@@ -498,11 +516,16 @@ void *SIM_RenderInit(void *arg) {
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                           g3RenderTextureId, 0);
@@ -1501,7 +1718,7 @@ index d968038..7f6014b 100644
  
    // Check FBO status
    int fboStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-@@ -512,7 +534,6 @@ void *SIM_RenderInit(void *arg) {
+@@ -512,7 +535,6 @@ void *SIM_RenderInit(void *arg) {
  
    // Unbind all that stuff
    glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1509,7 +1726,7 @@ index d968038..7f6014b 100644
  
    glBindTexture(GL_TEXTURE_2D, g2TextureId);
  
-@@ -739,7 +760,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -739,7 +761,7 @@ static void DrawEngine(BOOL isSub) {
    // write all OAMs to the textures based on their priorities
    for (int i = 0; i < 4; i++) {
      glActiveTexture(GL_TEXTURE0 + s_objTexUnits[i]);
@@ -1518,7 +1735,7 @@ index d968038..7f6014b 100644
      void *oamPixelBuf;
      switch (i) {
      case 0:
-@@ -770,7 +791,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -770,7 +792,7 @@ static void DrawEngine(BOOL isSub) {
      if (bg0as3d) {
        glBindTexture(GL_TEXTURE_2D, g3RenderTextureId);
      } else {
@@ -1527,7 +1744,7 @@ index d968038..7f6014b 100644
      }
    } else {
      glBindTexture(GL_TEXTURE_2D, dummyScreenTextureId);
-@@ -778,7 +799,7 @@ static void DrawEngine(BOOL isSub) {
+@@ -778,7 +800,7 @@ static void DrawEngine(BOOL isSub) {
  
    // Setup the OBJWindow texture
    glActiveTexture(GL_TEXTURE0 + s_objWindowTexUnit);
@@ -1536,7 +1753,26 @@ index d968038..7f6014b 100644
    u8 *objWindowBuf = isSub ? objWindowsTex : objWindowTex;
    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_NDS_SCREEN_WIDTH,
                    SIM_NDS_SCREEN_HEIGHT * 2, GL_RGBA, GL_UNSIGNED_BYTE,
-@@ -969,7 +990,6 @@ void *SIM_Render(void *arg) {
+@@ -818,6 +840,18 @@ static void DrawEngine(BOOL isSub) {
+                      glGetUniformLocation(g2shaderProgramID, "bg0as3d"),
+                      bg0as3d);
+ 
++  // Tilt-shift only applies to the main engine's 3D layer
++  SIM_TiltShiftSettings *tiltShift = SIM_PostFX_GetTiltShiftSettings();
++  glProgramUniform1f(g2shaderProgramID,
++                     glGetUniformLocation(g2shaderProgramID, "tiltShiftBlur"),
++                     isSub ? 0.0f : G3SIM_PostFX_GetTiltShiftBlur());
++  glProgramUniform1f(g2shaderProgramID,
++                     glGetUniformLocation(g2shaderProgramID, "tiltShiftFocusY"),
++                     tiltShift->focusY);
++  glProgramUniform1f(g2shaderProgramID,
++                     glGetUniformLocation(g2shaderProgramID, "tiltShiftFocusSize"),
++                     tiltShift->focusSize);
++
+   // Pass master bright info to the shader
+   float masterBrightFactor = isSub
+                                  ? (float)(s_reg_GXS_DB_MASTER_BRIGHT & 0b11111)
+@@ -969,7 +1003,6 @@ void *SIM_Render(void *arg) {
  
      // Unbind 3D Framebuffer
      glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1544,7 +1780,7 @@ index d968038..7f6014b 100644
      glUseProgram(g2shaderProgramID);
  
      glDisable(GL_DEPTH_TEST);
-@@ -982,6 +1002,8 @@ void *SIM_Render(void *arg) {
+@@ -982,6 +1015,8 @@ void *SIM_Render(void *arg) {
      int viewX = 0;
      int viewY = 0;
      float aspectRatio;
@@ -1553,7 +1789,7 @@ index d968038..7f6014b 100644
  
      SDL_GetWindowSize(window, &windowWidth, &windowHeight);
  
-@@ -989,15 +1011,19 @@ void *SIM_Render(void *arg) {
+@@ -989,15 +1024,19 @@ void *SIM_Render(void *arg) {
      switch (s_SIM_config.screenLayout) {
      default:
      case SIM_CONFIG_SCREEN_LAYOUT_VERTICAL:
@@ -1576,7 +1812,7 @@ index d968038..7f6014b 100644
  
      viewWidth = windowWidth;
      viewHeight = (int)((float)windowWidth / aspectRatio);
-@@ -1010,7 +1036,38 @@ void *SIM_Render(void *arg) {
+@@ -1010,7 +1049,38 @@ void *SIM_Render(void *arg) {
        viewY = 0;
      }
  
@@ -1616,7 +1852,7 @@ index d968038..7f6014b 100644
  
      // Set up the bounding box of the touch panel
      if (s_SIM_config.swapScreens) {
-@@ -1074,8 +1131,25 @@ void *SIM_Render(void *arg) {
+@@ -1074,8 +1144,25 @@ void *SIM_Render(void *arg) {
            break;
          }
        }
@@ -1642,7 +1878,7 @@ index d968038..7f6014b 100644
          if (keyRead == s_SIM_config.padSettings.aKey) {
            // A Button
            s_reg_PAD_KEYINPUT = s_reg_PAD_KEYINPUT & 0b1111111111111110;
-@@ -1352,9 +1426,8 @@ void *SIM_Render(void *arg) {
+@@ -1352,9 +1439,8 @@ void *SIM_Render(void *arg) {
      glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
  
    } while (SIM::GUI::IsGameLogicPaused());
@@ -1653,6 +1889,41 @@ index d968038..7f6014b 100644
  
    // Setup 3D Viewport
    if (s_reg_GX_POWCNT >> 15) {
+diff --git a/libraries/sim/src/sim_post_effects.cpp b/libraries/sim/src/sim_post_effects.cpp
+new file mode 100644
+index 0000000..2d64cb5
+--- /dev/null
++++ b/libraries/sim/src/sim_post_effects.cpp
+@@ -0,0 +1,29 @@
++#include <simulator/sim_post_effects.h>
++
++static SIM_TiltShiftSettings sTiltShift = {
++    .enabled = TRUE,
++    .maxBlur = 2.0f,
++    .focusY = 0.5f,
++    .focusSize = 0.12f,
++};
++
++static BOOL sRequested = FALSE;
++static BOOL sActive = FALSE;
++
++void SIM_PostFX_Request(void) {
++    sRequested = TRUE;
++}
++
++
++SIM_TiltShiftSettings * SIM_PostFX_GetTiltShiftSettings(void) {
++    return &sTiltShift;
++}
++
++void G3SIM_PostFX_LatchFrame(void) {
++    sActive = sRequested;
++    sRequested = FALSE;
++}
++
++float G3SIM_PostFX_GetTiltShiftBlur(void) {
++    return sActive && sTiltShift.enabled ? sTiltShift.maxBlur : 0.0f;
++}
 diff --git a/meson.build b/meson.build
 index 3dc91bf..710b510 100644
 --- a/meson.build
